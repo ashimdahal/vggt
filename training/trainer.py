@@ -4,12 +4,25 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+
+# --- Environment Variable Setup for Performance and Debugging ---
+# Helps with memory fragmentation in PyTorch's memory allocator.
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+# Specifies the threading layer for MKL, can prevent hangs in some environments.
+os.environ["MKL_THREADING_LAYER"] = "GNU"
+# Provides full Hydra stack traces on error for easier debugging.
+os.environ["HYDRA_FULL_ERROR"] = "1"
+# Enables asynchronous error handling for NCCL, which can prevent hangs.
+os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+
+
 import contextlib
 import gc
 import json
 import logging
 import math
-import os
 import time
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -28,16 +41,6 @@ from train_utils.general import *
 from train_utils.logging import setup_logging
 from train_utils.normalization import normalize_camera_extrinsics_and_points_batch
 from train_utils.optimizer import construct_optimizers
-
-# --- Environment Variable Setup for Performance and Debugging ---
-# Helps with memory fragmentation in PyTorch's memory allocator.
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-# Specifies the threading layer for MKL, can prevent hangs in some environments.
-os.environ["MKL_THREADING_LAYER"] = "GNU"
-# Provides full Hydra stack traces on error for easier debugging.
-os.environ["HYDRA_FULL_ERROR"] = "1"
-# Enables asynchronous error handling for NCCL, which can prevent hangs.
-os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
 
 class Trainer:
@@ -376,7 +379,7 @@ class Trainer:
         while self.epoch < self.max_epochs:
             set_seeds(self.seed_value + self.epoch * 100, self.max_epochs, self.distributed_rank)
             
-            dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
+            dataloader = self.train_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
             self.train_epoch(dataloader)
             
             # Save checkpoint after each training epoch
@@ -403,7 +406,7 @@ class Trainer:
             logging.info("No validation dataset configured. Skipping validation.")
             return
 
-        dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
+        dataloader = self.val_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
         self.val_epoch(dataloader)
         
         del dataloader

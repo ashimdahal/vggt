@@ -329,7 +329,7 @@ def depth_to_world_coords_points(
         depth_map (np.ndarray):
             Depth map of shape (H, W).
         extrinsic (np.ndarray):
-            Extrinsic matrix of shape (3, 4), representing the camera pose in OpenCV convention (camera-to-world).
+            Extrinsic matrix of shape (3, 4), representing the camera pose in OpenCV convention (camera-from-world).
         intrinsic (np.ndarray):
             Intrinsic matrix of shape (3, 3).
         eps (float):

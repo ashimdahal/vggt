@@ -10,6 +10,7 @@ This module provides functions for working with PyTorch's distributed
 training capabilities and ensuring reproducible data loading.
 """
 
+import os
 import torch
 import random
 import numpy as np
@@ -71,12 +72,14 @@ def default_worker_init_fn(worker_id, num_workers, epoch, seed=0):
     """
     rank = get_rank()
     world_size = get_world_size()
-    
+    distributed_rank = int(os.environ.get("RANK", None))
+
     # Use prime numbers for better distribution
     RANK_MULTIPLIER = 1
     WORKER_MULTIPLIER = 1
     WORLD_MULTIPLIER = 1
     EPOCH_MULTIPLIER = 12345
+    DISTRIBUTED_RANK_MULTIPLIER = 1042
     
     worker_seed = (
         rank * num_workers * RANK_MULTIPLIER + 
@@ -84,13 +87,17 @@ def default_worker_init_fn(worker_id, num_workers, epoch, seed=0):
         seed + 
         world_size * WORLD_MULTIPLIER + 
         epoch * EPOCH_MULTIPLIER
+        + distributed_rank * DISTRIBUTED_RANK_MULTIPLIER
     )
+
+    print(f"Rank: {rank}, World size: {world_size}, Distributed rank: {distributed_rank}")
+    print(f"Worker seed: {worker_seed}")
+    
     
     torch.random.manual_seed(worker_seed)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
     return
-
 
 def get_worker_init_fn(seed, num_workers, epoch, worker_init_fn=None):
     """
