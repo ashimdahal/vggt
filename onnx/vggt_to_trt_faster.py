@@ -158,6 +158,28 @@ def _prune_to_outputs(m: onnx.ModelProto) -> None:
     del g.initializer[:]
     g.initializer.extend(filtered_inits)
 
+def _ensure_ai_onnx_opset(m, default_version: int) -> None:
+    """
+    Ensure exactly one opset_import for the main ONNX domain.
+    Use 'ai.onnx' explicitly (some toolchains reject the empty-domain alias).
+    Keeps all other domain imports (e.g., 'ai.onnx.ml') untouched.
+    """
+    # current imports as a dict
+    seen = {imp.domain: int(getattr(imp, "version", 0)) for imp in m.opset_import}
+
+    # choose a version for ai.onnx: prefer existing, else empty-domain, else default
+    ai_ver = seen.get("ai.onnx", seen.get("", int(default_version)))
+    if not ai_ver:
+        ai_ver = int(default_version)
+
+    from onnx import helper
+    new_imports = [imp for imp in m.opset_import if imp.domain not in ("", "ai.onnx")]
+    new_imports.append(helper.make_operatorsetid("ai.onnx", int(ai_ver)))
+
+    # replace in-place (avoid creating a gigantic new proto)
+    del m.opset_import[:]
+    m.opset_import.extend(new_imports)
+
 # ---------- INT8 Calibrator ----------
 
 class _EntropyCalibrator:  # Minimal calibrator using random data unless images are provided later
@@ -459,18 +481,24 @@ class VGGTPipeline:
 
         logger.info("Simplifying ONNX graph…")
         m = onnx.load(src, load_external_data=True)
+        _ensure_ai_onnx_opset(m, int(self.opset))
+        # right after: m = onnx.load(src, load_external_data=True)
+        # if not m.opset_import or len(m.opset_import) == 0:
+        #     imp = onnx.helper.make_operatorsetid("", self.opset)  # e.g., 18
+        #     m.opset_import.extend([imp])
+
 
         # --- minimal fix: ensure default opset import exists & matches self.opset ---
-        from onnx import helper
-        default = None
-        for imp in m.opset_import:
-            if imp.domain in ("", "ai.onnx"):
-                default = imp
-                break
-        if default is None:
-            m.opset_import.extend([helper.make_operatorsetid("", int(self.opset))])
-        else:
-            default.version = int(self.opset)
+        # from onnx import helper
+        # default = None
+        # for imp in m.opset_import:
+        #     if imp.domain in ("", "ai.onnx"):
+        #         default = imp
+        #         break
+        # if default is None:
+        #     m.opset_import.extend([helper.make_operatorsetid("", int(self.opset))])
+        # else:
+        #     default.version = int(self.opset)
         # ---------------------------------------------------------------------------
 
         # call onnxsim with your existing kwargs
