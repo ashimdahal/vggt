@@ -1,18 +1,18 @@
-[10/21/2025-20:40:44] [TRT] [I] Loaded engine size: 2312 MiB
-[10/21/2025-20:40:44] [TRT] [V] Deserialization required 170217 microseconds.
+[10/21/2025-21:04:08] [TRT] [I] Loaded engine size: 2312 MiB
+[10/21/2025-21:04:08] [TRT] [V] Deserialization required 172438 microseconds.
 /home/ashim/Documents/projects/vggt/onnx/trt_inference.py:136: DeprecationWarning: Use Implicit batch dimensions support has been removed instead.
   if self.engine.has_implicit_batch_dimension:
-[10/21/2025-20:40:44] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
-[10/21/2025-20:40:44] [TRT] [I] [MS] Running engine with multi stream info
-[10/21/2025-20:40:44] [TRT] [I] [MS] Number of aux streams is 4
-[10/21/2025-20:40:44] [TRT] [I] [MS] Number of total worker streams is 5
-[10/21/2025-20:40:44] [TRT] [I] [MS] The main stream provided by execute/enqueue calls is the first worker stream
-[10/21/2025-20:40:44] [TRT] [V] Total per-runner device persistent memory is 224256
-[10/21/2025-20:40:44] [TRT] [V] Total per-runner host persistent memory is 388432
-[10/21/2025-20:40:44] [TRT] [V] Allocated device scratch memory of size 2816569344
-[10/21/2025-20:40:44] [TRT] [V] - Runner scratch: 2816569344 bytes
-[10/21/2025-20:40:45] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +2686, now: CPU 0, GPU 4964 (MiB)
-[10/21/2025-20:40:45] [TRT] [V] CUDA lazy loading is enabled.
+[10/21/2025-21:04:08] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/21/2025-21:04:08] [TRT] [I] [MS] Running engine with multi stream info
+[10/21/2025-21:04:08] [TRT] [I] [MS] Number of aux streams is 4
+[10/21/2025-21:04:08] [TRT] [I] [MS] Number of total worker streams is 5
+[10/21/2025-21:04:08] [TRT] [I] [MS] The main stream provided by execute/enqueue calls is the first worker stream
+[10/21/2025-21:04:08] [TRT] [V] Total per-runner device persistent memory is 224256
+[10/21/2025-21:04:08] [TRT] [V] Total per-runner host persistent memory is 388432
+[10/21/2025-21:04:08] [TRT] [V] Allocated device scratch memory of size 2816569344
+[10/21/2025-21:04:08] [TRT] [V] - Runner scratch: 2816569344 bytes
+[10/21/2025-21:04:09] [TRT] [I] [MemUsageChange] TensorRT-managed allocation in IExecutionContext creation: CPU +0, GPU +2686, now: CPU 0, GPU 4964 (MiB)
+[10/21/2025-21:04:09] [TRT] [V] CUDA lazy loading is enabled.
 [INFO] Loaded engine: onnx_exports/vggt-8x3x518x518_fp16.engine
 [INFO] TRT version: 10.11.0.33
 [INFO] Execution mode: execute_async_v3
@@ -24,28 +24,28 @@
   OUT  4 view_451                         (1, 8, 518, 518, 3) <class 'numpy.float32'> 25.76 MB
   OUT  5 view_452                         (1, 8, 518, 518) <class 'numpy.float32'> 8.59 MB
   OUT  6 unsqueeze                        (1, 8, 3, 518, 518) <class 'numpy.float32'> 25.76 MB
-[INFO] Using random input: shape=(8, 3, 518, 518), dtype=<class 'numpy.float16'>
+[INFO] Loading 8 images from examples/room/images
 
 [INFO] Output diagnostics (first run):
-  out0: name=cat_322                          shape=(1, 8, 9) dtype=float32 min=-0.00717545 max=1.40137 mean=0.420242
-  out1: name=view_411                         shape=(1, 8, 518, 518, 1) dtype=float32 min=0.33374 max=1.00586 mean=0.596576
-  out2: name=view_412                         shape=(1, 8, 518, 518) dtype=float32 min=1 max=1.0459 mean=1.00002
-  out3: name=view_451                         shape=(1, 8, 518, 518, 3) dtype=float32 min=-0.461914 max=0.836914 mean=0.18439
-  out4: name=view_452                         shape=(1, 8, 518, 518) dtype=float32 min=1 max=1.00586 mean=1.00001
-  out5: name=unsqueeze                        shape=(1, 8, 3, 518, 518) dtype=float32 min=1.19209e-07 max=1 mean=0.500042
+  out0: name=cat_322                          shape=(1, 8, 9) dtype=float32 min=-0.834473 max=1.00098 mean=0.27045
+  out1: name=view_411                         shape=(1, 8, 518, 518, 1) dtype=float32 min=0.354492 max=2.60156 mean=0.874573
+  out2: name=view_412                         shape=(1, 8, 518, 518) dtype=float32 min=1 max=2.87109 mean=1.89583
+  out3: name=view_451                         shape=(1, 8, 518, 518, 3) dtype=float32 min=-2.40039 max=1.72852 mean=0.255131
+  out4: name=view_452                         shape=(1, 8, 518, 518) dtype=float32 min=1 max=2.33789 mean=1.07501
+  out5: name=unsqueeze                        shape=(1, 8, 3, 518, 518) dtype=float32 min=0 max=1 mean=0.538725
 
 ========== Performance Stats ==========
-          iterations: 200
-       H2D mean (ms): 1.050
-   Compute mean (ms): 165.384
-       D2H mean (ms): 3.085
-     Total mean (ms): 169.518
-      Total std (ms): 1.274
-      Total min (ms): 165.834
-      Total max (ms): 172.033
-         FPS (batch): 5.90
+          iterations: 100
+       H2D mean (ms): 1.048
+   Compute mean (ms): 164.429
+       D2H mean (ms): 3.072
+     Total mean (ms): 168.548
+      Total std (ms): 0.873
+      Total min (ms): 166.188
+      Total max (ms): 170.205
+         FPS (batch): 5.93
 
-✗ Below real-time: 5.9 FPS (169.5ms > 33.3ms)
+✗ Below real-time: 5.9 FPS (168.5ms > 33.3ms)
   Consider: --use-random to test pure model performance
 
-Camera-level throughput: 47.2 camera-FPS (8 cameras × 5.9 batch-FPS)
+Camera-level throughput: 47.5 camera-FPS (8 cameras × 5.9 batch-FPS)
