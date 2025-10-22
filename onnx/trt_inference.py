@@ -28,6 +28,7 @@ import os
 import sys
 import time
 import argparse
+import atexit
 from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
@@ -53,13 +54,25 @@ except Exception:
     cv2 = None
 
 
+# Cleanup handler to prevent shutdown spam
+def _cleanup_cuda():
+    """Cleanup CUDA context on exit to prevent error messages."""
+    try:
+        if hasattr(cuda, "Context"):
+            cuda.Context.synchronize()
+    except Exception:
+        pass
+
+atexit.register(_cleanup_cuda)
+
+
 # ---------------- Utilities ----------------
 
 def trt_to_np_dtype(dt: trt.DataType) -> np.dtype:
     """Map TensorRT dtype to NumPy dtype."""
     if dt == trt.DataType.FLOAT:  return np.float32
     if dt == trt.DataType.HALF:   return np.float16
-    if dt == trt.DataType.BF16:   return np.float16  # BF16 via FP16 host I/O
+    if dt == trt.DataType.BF16:   return np.dtype("bfloat16")  # Correct BF16 mapping
     if dt == trt.DataType.INT8:   return np.int8
     if dt == trt.DataType.INT32:  return np.int32
     if dt == trt.DataType.BOOL:   return np.bool_
@@ -127,36 +140,74 @@ class SimpleTrtRunner:
         if self.context is None:
             raise RuntimeError("Failed to create execution context")
 
-        # Discover bindings
+        # --- Pick API family (bindings vs IO tensors) ---
+        self._use_io_tensors = hasattr(self.engine, "num_io_tensors") and not hasattr(self.engine, "num_bindings")
+
+        # Discover bindings (handle both TRT 8/9 and TRT 10+ APIs)
         self.bindings_meta: List[Dict[str, Any]] = []
-        for i in range(self.engine.num_bindings):
-            name = self.engine.get_binding_name(i)
-            is_input = self.engine.binding_is_input(i)
-            dtype = self.engine.get_binding_dtype(i)
-            np_dtype = trt_to_np_dtype(dtype)
-            shape = tuple(self.engine.get_binding_shape(i))
-            tensor_format = self.engine.get_binding_format(i)
-            
-            if any(d == -1 for d in shape):
-                raise RuntimeError(
-                    f"Dynamic shape detected for binding '{name}'. "
-                    "This runner expects static shapes."
-                )
-            
-            # Warn about non-linear formats
-            if tensor_format != trt.TensorFormat.LINEAR and verbose:
-                print(f"[WARN] Binding '{name}' uses non-LINEAR format: {tensor_format}")
-            
-            self.bindings_meta.append({
-                "index": i,
-                "name": name,
-                "is_input": is_input,
-                "dtype": dtype,
-                "np_dtype": np_dtype,
-                "shape": shape,
-                "format": tensor_format,
-                "nbytes": np.dtype(np_dtype).itemsize * vol(shape)
-            })
+        
+        if self._use_io_tensors:
+            # TRT ≥ 10: IO-tensor API
+            mode_enum = trt.TensorIOMode  # INPUT / OUTPUT
+            n = int(self.engine.num_io_tensors)
+            for i in range(n):
+                name = self.engine.get_tensor_name(i)
+                mode = self.engine.get_tensor_mode(name)
+                is_input = (mode == mode_enum.INPUT)
+                dtype = self.engine.get_tensor_dtype(name)
+                np_dtype = trt_to_np_dtype(dtype)
+                shape = tuple(self.engine.get_tensor_shape(name))
+                fmt = self.engine.get_tensor_format(name) if hasattr(self.engine, "get_tensor_format") else trt.TensorFormat.LINEAR
+                
+                if any(d == -1 for d in shape):
+                    raise RuntimeError(
+                        f"Dynamic shape detected for tensor '{name}'. "
+                        "This runner expects static shapes."
+                    )
+                
+                if fmt != trt.TensorFormat.LINEAR and verbose:
+                    print(f"[WARN] Tensor '{name}' uses non-LINEAR format: {fmt}")
+                
+                self.bindings_meta.append({
+                    "index": i,  # index within IO-tensor list
+                    "name": name,
+                    "is_input": is_input,
+                    "dtype": dtype,
+                    "np_dtype": np_dtype,
+                    "shape": shape,
+                    "format": fmt,
+                    "nbytes": np.dtype(np_dtype).itemsize * vol(shape),
+                })
+        else:
+            # TRT 8/9: legacy binding API
+            for i in range(int(self.engine.num_bindings)):
+                name = self.engine.get_binding_name(i)
+                is_input = self.engine.binding_is_input(i)
+                dtype = self.engine.get_binding_dtype(i)
+                np_dtype = trt_to_np_dtype(dtype)
+                shape = tuple(self.engine.get_binding_shape(i))
+                tensor_format = self.engine.get_binding_format(i)
+                
+                if any(d == -1 for d in shape):
+                    raise RuntimeError(
+                        f"Dynamic shape detected for binding '{name}'. "
+                        "This runner expects static shapes."
+                    )
+                
+                # Warn about non-linear formats
+                if tensor_format != trt.TensorFormat.LINEAR and verbose:
+                    print(f"[WARN] Binding '{name}' uses non-LINEAR format: {tensor_format}")
+                
+                self.bindings_meta.append({
+                    "index": i,
+                    "name": name,
+                    "is_input": is_input,
+                    "dtype": dtype,
+                    "np_dtype": np_dtype,
+                    "shape": shape,
+                    "format": tensor_format,
+                    "nbytes": np.dtype(np_dtype).itemsize * vol(shape)
+                })
 
         # Separate input/output
         self.input_meta = [b for b in self.bindings_meta if b["is_input"]]
@@ -167,15 +218,28 @@ class SimpleTrtRunner:
         self.input = self.input_meta[0]
 
         # Allocate single stream and buffers
-        self.stream = cuda.Stream(flags=cuda.stream_flags.NON_BLOCKING)
+        # --- Pick API family (bindings vs IO tensors) ---
+        self._use_io_tensors = hasattr(self.engine, "num_io_tensors") and not hasattr(self.engine, "num_bindings")
+        
+        # Allocate single stream (prefer NON_BLOCKING if this PyCUDA exposes it)
+        try:
+            nb_flag = getattr(getattr(cuda, "stream_flags", None), "NON_BLOCKING", None)
+            self.stream = cuda.Stream(flags=nb_flag) if nb_flag is not None else cuda.Stream()
+        except TypeError:
+            # Older PyCUDA builds may not accept the 'flags' kwarg
+            self.stream = cuda.Stream()
+
         self._alloc_buffers()
 
-        # Pick execution API (prefer async for RTX 5090)
-        if force_sync:
-            self._exec_api = "execute_v2" if hasattr(self.context, "execute_v2") else "execute_async_v2"
+        # Pick execution API based on TRT version
+        if self._use_io_tensors:
+            self._exec_api = "execute_async_v3"
         else:
-            # Default to async (no host sync overhead)
-            self._exec_api = "execute_async_v2" if hasattr(self.context, "execute_async_v2") else "execute_v2"
+            if force_sync:
+                self._exec_api = "execute_v2" if hasattr(self.context, "execute_v2") else "execute_async_v2"
+            else:
+                # Default to async (no host sync overhead)
+                self._exec_api = "execute_async_v2" if hasattr(self.context, "execute_async_v2") else "execute_v2"
 
         if verbose:
             print(f"[INFO] TRT version: {getattr(trt, '__version__', 'unknown')}")
@@ -214,18 +278,36 @@ class SimpleTrtRunner:
 
     def _alloc_buffers(self) -> None:
         """Allocate device buffers and pinned host buffers."""
-        # Device buffers
-        self.dev_ptrs: List[int] = [0] * self.engine.num_bindings
-        for b in self.bindings_meta:
-            dmem = cuda.mem_alloc(int(b["nbytes"]))
-            self.dev_ptrs[b["index"]] = int(dmem)
-            b["device_allocation"] = dmem  # keep reference alive
+        if self._use_io_tensors:
+            # TRT 10+: Device buffers keyed by tensor name
+            self.dev_ptrs_by_name: Dict[str, int] = {}
+            for b in self.bindings_meta:
+                dmem = cuda.mem_alloc(int(b["nbytes"]))
+                self.dev_ptrs_by_name[b["name"]] = int(dmem)
+                b["device_allocation"] = dmem  # keep reference alive
 
-        # Pinned host buffers for fast H2D/D2H
-        self.host_input = pinned_empty(self.input["shape"], self.input["np_dtype"])
-        self.host_outputs: List[np.ndarray] = [
-            pinned_empty(b["shape"], b["np_dtype"]) for b in self.output_meta
-        ]
+            # Tell the context where each tensor lives (set once, reuse forever)
+            for b in self.bindings_meta:
+                self.context.set_tensor_address(b["name"], self.dev_ptrs_by_name[b["name"]])
+
+            # Pinned host buffers
+            self.host_input = pinned_empty(self.input["shape"], self.input["np_dtype"])
+            self.host_outputs: List[np.ndarray] = [
+                pinned_empty(b["shape"], b["np_dtype"]) for b in self.output_meta
+            ]
+        else:
+            # TRT 8/9: Legacy bindings path (indexed)
+            self.dev_ptrs: List[int] = [0] * self.engine.num_bindings
+            for b in self.bindings_meta:
+                dmem = cuda.mem_alloc(int(b["nbytes"]))
+                self.dev_ptrs[b["index"]] = int(dmem)
+                b["device_allocation"] = dmem  # keep reference alive
+
+            # Pinned host buffers
+            self.host_input = pinned_empty(self.input["shape"], self.input["np_dtype"])
+            self.host_outputs: List[np.ndarray] = [
+                pinned_empty(b["shape"], b["np_dtype"]) for b in self.output_meta
+            ]
 
     # ---------- Inference API ----------
 
@@ -253,39 +335,68 @@ class SimpleTrtRunner:
                 f"engine expected {self.input['shape']}"
             )
 
-        # H2D: Copy to pinned buffer then to device (fastest path)
-        np.copyto(self.host_input, batch_nchw, casting='no')
-        cuda.memcpy_htod_async(
-            self.dev_ptrs[self.input["index"]],
-            self.host_input,
-            self.stream
-        )
-
-        # Execute
-        if self._exec_api == "execute_v2":
-            # Synchronous execution requires prior operations to complete
-            self.stream.synchronize()
-            ok = self.context.execute_v2(self.dev_ptrs)
-        else:
-            # Async execution (default, no host sync)
-            ok = self.context.execute_async_v2(self.dev_ptrs, self.stream.handle)
-        
-        if not ok:
-            raise RuntimeError("TensorRT execution failed")
-
-        # D2H: Copy outputs back to host
-        outs: List[np.ndarray] = []
-        for i, b in enumerate(self.output_meta):
-            cuda.memcpy_dtoh_async(
-                self.host_outputs[i],
-                self.dev_ptrs[b["index"]],
+        if self._use_io_tensors:
+            # --- TRT 10+: IO-tensor API path ---
+            # H2D: Copy to pinned buffer then to device
+            np.copyto(self.host_input, batch_nchw, casting='no')
+            cuda.memcpy_htod_async(
+                self.dev_ptrs_by_name[self.input["name"]],
+                self.host_input,
                 self.stream
             )
-            # Return copy if requested (safe for storage), else reused buffer (faster)
-            outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
 
-        self.stream.synchronize()
-        return outs
+            # Execute (tensor addresses already set in _alloc_buffers)
+            ok = self.context.execute_async_v3(self.stream.handle)
+            if not ok:
+                raise RuntimeError("TensorRT execute_async_v3 failed")
+
+            # D2H: Copy outputs back to host
+            outs: List[np.ndarray] = []
+            for i, b in enumerate(self.output_meta):
+                cuda.memcpy_dtoh_async(
+                    self.host_outputs[i],
+                    self.dev_ptrs_by_name[b["name"]],
+                    self.stream
+                )
+                outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
+
+            self.stream.synchronize()
+            return outs
+
+        else:
+            # --- TRT 8/9: Legacy bindings API path ---
+            # H2D: Copy to pinned buffer then to device
+            np.copyto(self.host_input, batch_nchw, casting='no')
+            cuda.memcpy_htod_async(
+                self.dev_ptrs[self.input["index"]],
+                self.host_input,
+                self.stream
+            )
+
+            # Execute
+            if self._exec_api == "execute_v2":
+                # Synchronous execution requires prior operations to complete
+                self.stream.synchronize()
+                ok = self.context.execute_v2(self.dev_ptrs)
+            else:
+                # Async execution (default, no host sync)
+                ok = self.context.execute_async_v2(self.dev_ptrs, self.stream.handle)
+            
+            if not ok:
+                raise RuntimeError("TensorRT execution failed")
+
+            # D2H: Copy outputs back to host
+            outs: List[np.ndarray] = []
+            for i, b in enumerate(self.output_meta):
+                cuda.memcpy_dtoh_async(
+                    self.host_outputs[i],
+                    self.dev_ptrs[b["index"]],
+                    self.stream
+                )
+                outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
+
+            self.stream.synchronize()
+            return outs
 
     def infer_with_timing(
         self,
@@ -315,40 +426,74 @@ class SimpleTrtRunner:
         compute_done = cuda.Event()
         d2h_done = cuda.Event()
 
-        # H2D
-        start.record(self.stream)
-        np.copyto(self.host_input, batch_nchw, casting='no')
-        cuda.memcpy_htod_async(
-            self.dev_ptrs[self.input["index"]],
-            self.host_input,
-            self.stream
-        )
-        h2d_done.record(self.stream)
-
-        # Execute
-        if self._exec_api == "execute_v2":
-            self.stream.synchronize()
-            ok = self.context.execute_v2(self.dev_ptrs)
-        else:
-            ok = self.context.execute_async_v2(self.dev_ptrs, self.stream.handle)
-        
-        if not ok:
-            raise RuntimeError("TensorRT execution failed")
-        
-        compute_done.record(self.stream)
-
-        # D2H
-        outs: List[np.ndarray] = []
-        for i, b in enumerate(self.output_meta):
-            cuda.memcpy_dtoh_async(
-                self.host_outputs[i],
-                self.dev_ptrs[b["index"]],
+        if self._use_io_tensors:
+            # --- TRT 10+: IO-tensor API path ---
+            # H2D
+            start.record(self.stream)
+            np.copyto(self.host_input, batch_nchw, casting='no')
+            cuda.memcpy_htod_async(
+                self.dev_ptrs_by_name[self.input["name"]],
+                self.host_input,
                 self.stream
             )
-            outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
-        
-        d2h_done.record(self.stream)
-        d2h_done.synchronize()
+            h2d_done.record(self.stream)
+
+            # Execute (tensor addresses already set in _alloc_buffers)
+            ok = self.context.execute_async_v3(self.stream.handle)
+            if not ok:
+                raise RuntimeError("TensorRT execute_async_v3 failed")
+            
+            compute_done.record(self.stream)
+
+            # D2H
+            outs: List[np.ndarray] = []
+            for i, b in enumerate(self.output_meta):
+                cuda.memcpy_dtoh_async(
+                    self.host_outputs[i],
+                    self.dev_ptrs_by_name[b["name"]],
+                    self.stream
+                )
+                outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
+            
+            d2h_done.record(self.stream)
+            d2h_done.synchronize()
+
+        else:
+            # --- TRT 8/9: Legacy bindings API path ---
+            # H2D
+            start.record(self.stream)
+            np.copyto(self.host_input, batch_nchw, casting='no')
+            cuda.memcpy_htod_async(
+                self.dev_ptrs[self.input["index"]],
+                self.host_input,
+                self.stream
+            )
+            h2d_done.record(self.stream)
+
+            # Execute
+            if self._exec_api == "execute_v2":
+                self.stream.synchronize()
+                ok = self.context.execute_v2(self.dev_ptrs)
+            else:
+                ok = self.context.execute_async_v2(self.dev_ptrs, self.stream.handle)
+            
+            if not ok:
+                raise RuntimeError("TensorRT execution failed")
+            
+            compute_done.record(self.stream)
+
+            # D2H
+            outs: List[np.ndarray] = []
+            for i, b in enumerate(self.output_meta):
+                cuda.memcpy_dtoh_async(
+                    self.host_outputs[i],
+                    self.dev_ptrs[b["index"]],
+                    self.stream
+                )
+                outs.append(self.host_outputs[i].copy() if copy_outputs else self.host_outputs[i])
+            
+            d2h_done.record(self.stream)
+            d2h_done.synchronize()
 
         # Compute elapsed times
         timings = {
@@ -684,3 +829,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
