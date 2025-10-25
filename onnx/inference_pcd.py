@@ -15,36 +15,123 @@ scripts remain untouched.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import random
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .pcd import align, depth_anything, fusion, io_utils, raycast, vggt_trt
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover - OpenCV optional
+    cv2 = None
+
+from .pcd import align, depth_anything, fusion, io_deepview, io_utils, raycast, vggt_trt
 
 
 LOGGER = logging.getLogger("pcd")
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Live point-cloud reconstruction using VGGT + Depth Anything",
+        description="Live point-cloud reconstruction using VGGT + Depth Anything.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="generic",
+        choices=["generic", "deepview"],
+        help="Dataset adapter to use (generic directory layout or DeepView light-field).",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        default=None,
+        help="Root directory containing scenes for the selected dataset.",
+    )
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default=None,
+        help="Scene identifier within --dataset-root (DeepView or generic).",
+    )
+    parser.add_argument(
+        "--n-views",
+        type=int,
+        default=8,
+        help="Number of camera views to use for VGGT bootstrap and live updates.",
+    )
+    parser.add_argument(
+        "--view-select",
+        type=str,
+        default="max-spread",
+        choices=["max-spread", "front-arc", "random"],
+        help="Automatic view selection strategy when --views is not provided.",
+    )
+    parser.add_argument(
+        "--views",
+        type=str,
+        default=None,
+        help="Comma separated list of camera IDs to use (overrides auto selection).",
+    )
+    parser.add_argument(
+        "--undistort",
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Fisheye undistortion mode (auto enables for fisheye cameras only).",
+    )
+    parser.add_argument(
+        "--rectify-size",
+        type=int,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        default=(518, 518),
+        help="Target resolution for rectified images (VGGT expects 518x518).",
+    )
+    parser.add_argument(
+        "--cache-rectify-maps",
+        action="store_true",
+        help="Persist fisheye rectification maps to disk for reuse.",
+    )
+    parser.add_argument(
+        "--validate-projection",
+        action="store_true",
+        help="Project the DeepView README reference world point and report pixels.",
+    )
+    parser.add_argument(
+        "--frame-index",
+        type=int,
+        default=0,
+        help="Initial frame index to bootstrap from (DeepView/video datasets).",
+    )
+    parser.add_argument(
+        "--frame-stride",
+        type=int,
+        default=1,
+        help="Process every Nth frame when iterating through sequences.",
+    )
+    parser.add_argument(
+        "--timestamp",
+        type=float,
+        default=None,
+        help="Optional timestamp hint (reserved for future synchronization hooks).",
     )
     parser.add_argument(
         "--source",
         type=str,
         default="images",
         choices=["images", "videos", "webcams"],
-        help="Input modality for live frames.",
+        help="Legacy generic dataset input modality (used when --dataset=generic).",
     )
     parser.add_argument(
         "--images",
         type=str,
         default=None,
-        help="Directory of per-camera images (used when --source=images).",
+        help="Directory of per-camera images (used for generic datasets).",
     )
     parser.add_argument(
         "--images_live",
@@ -56,37 +143,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--videos",
         type=str,
         default=None,
-        help="Directory containing per-camera videos (used when --source=videos).",
+        help="Directory containing per-camera videos (generic mode).",
     )
     parser.add_argument(
         "--webcams",
         type=str,
         nargs="*",
-        help="List of webcam indices or name=index pairs (used when --source=webcams).",
-    )
-    parser.add_argument(
-        "--num_cams",
-        type=int,
-        default=8,
-        help="Number of camera views to use for VGGT bootstrap and live updates.",
-    )
-    parser.add_argument(
-        "--views",
-        type=str,
-        default=None,
-        help="Comma separated list of camera IDs to use (overrides auto discovery).",
-    )
-    parser.add_argument(
-        "--random_views",
-        type=int,
-        default=0,
-        help="When >0, randomly sample this many cameras from the available set.",
-    )
-    parser.add_argument(
-        "--frame_step",
-        type=int,
-        default=1,
-        help="Process every Nth frame in streaming modes (default: 1).",
+        help="List of webcam indices or name=index pairs (generic live capture).",
     )
     parser.add_argument(
         "--max_batches",
@@ -97,21 +160,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--intrinsics",
         type=str,
-        required=True,
-        help="Camera intrinsics (JSON/YAML/NPZ).",
+        default=None,
+        help="Camera intrinsics (JSON/YAML/NPZ) for generic datasets.",
     )
     parser.add_argument(
         "--poses",
         type=str,
-        required=True,
-        help="Camera to world poses (JSON/YAML/NPZ).",
+        default=None,
+        help="Camera-to-world poses (JSON/YAML/NPZ) for generic datasets.",
     )
     parser.add_argument(
         "--initial_map",
         type=str,
         default=None,
-        help="Existing map (.ply or .npz). If not provided and --test_mode=1,"
-        " bootstrap from VGGT.",
+        help="Existing map (.ply or .npz). If not provided and --test-mode=1 bootstrap from VGGT.",
     )
     parser.add_argument(
         "--vggt_engine",
@@ -129,7 +191,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--depth_workers",
         type=int,
         default=None,
-        help="Number of Depth Anything workers/engines to spawn (default: num_cams).",
+        help="Number of Depth Anything workers/engines to spawn (default: n-views).",
     )
     parser.add_argument(
         "--trt_precision",
@@ -191,7 +253,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=1234,
+        default=42,
         help="Random seed for reproducibility.",
     )
     parser.add_argument(
@@ -202,10 +264,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Logging verbosity.",
     )
     parser.add_argument(
-        "--test_mode",
+        "--test-mode",
         type=int,
         default=0,
-        help="Enable VGGT bootstrap then live simulation when set to 1.",
+        help="Enable VGGT bootstrap then simulated live updates when set to 1.",
+    )
+    # Legacy compatibility flags (suppressed in help but accepted).
+    parser.add_argument(
+        "--num_cams",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--frame_step",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--random_views",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -217,12 +298,151 @@ def _parse_view_list(views: Optional[str]) -> Optional[List[str]]:
     return parsed or None
 
 
-def _build_frame_provider(
+def _normalize_args(args: argparse.Namespace) -> None:
+    """
+    Harmonize legacy aliases and enforce defaults on the parsed arguments.
+    """
+    if getattr(args, "num_cams", None):
+        args.n_views = int(args.num_cams)
+    if getattr(args, "frame_step", None):
+        args.frame_stride = int(args.frame_step)
+    args.n_views = max(1, int(args.n_views))
+    args.frame_stride = max(1, int(args.frame_stride))
+
+
+def _scale_intrinsics_local(K: np.ndarray, scale_x: float, scale_y: float) -> np.ndarray:
+    scaled = np.array(K, dtype=np.float32)
+    scaled[0, 0] *= scale_x
+    scaled[0, 2] *= scale_x
+    scaled[1, 1] *= scale_y
+    scaled[1, 2] *= scale_y
+    return scaled
+
+
+def _resize_image(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required for image resizing.")
+    return cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+
+
+class DeepViewFrameProvider(io_utils.FrameProvider):
+    """
+    Frame provider that wraps ``DeepViewDataset`` objects and exposes the
+    legacy FrameProvider interface expected by the pipeline.
+    """
+
+    def __init__(
+        self,
+        dataset: io_deepview.DeepViewDataset,
+        camera_ids: Sequence[str],
+        *,
+        start_frame: int,
+        frame_stride: int,
+        max_batches: Optional[int],
+    ) -> None:
+        self.dataset = dataset
+        self.camera_ids = list(camera_ids)
+        self.start_frame = max(0, int(start_frame))
+        self.frame_stride = max(1, int(frame_stride))
+        self.max_batches = max_batches
+
+    def bootstrap(self, num_cams: int) -> List[io_utils.FrameData]:
+        frames: List[io_utils.FrameData] = []
+        count = min(num_cams, len(self.camera_ids))
+        if count == 0:
+            raise RuntimeError("DeepView dataset produced no cameras for bootstrap.")
+        for cam_id in self.camera_ids[:count]:
+            image = self.dataset.get_frame(cam_id, self.start_frame)
+            frames.append(
+                io_utils.FrameData(
+                    camera_id=cam_id,
+                    frame_id=self.start_frame,
+                    image=image,
+                    path=None,
+                    timestamp=None,
+                )
+            )
+        return frames
+
+    def iter_batches(self) -> Iterator[io_utils.FrameBatch]:
+        batch_idx = 0
+        frame_idx = self.start_frame
+        while True:
+            frames: Dict[str, io_utils.FrameData] = {}
+            try:
+                for cam_id in self.camera_ids:
+                    image = self.dataset.get_frame(cam_id, frame_idx)
+                    frames[cam_id] = io_utils.FrameData(
+                        camera_id=cam_id,
+                        frame_id=frame_idx,
+                        image=image,
+                        path=None,
+                        timestamp=None,
+                    )
+            except RuntimeError:
+                break
+            yield io_utils.FrameBatch(index=batch_idx, frames=frames)
+            batch_idx += 1
+            if self.max_batches is not None and batch_idx >= self.max_batches:
+                break
+            frame_idx += self.frame_stride
+
+    def close(self) -> None:
+        self.dataset.close()
+
+
+def _save_rectified_intrinsics(out_dir: Path, intrinsics: Dict[str, np.ndarray]) -> None:
+    target = out_dir / "calibration_rectified"
+    target.mkdir(parents=True, exist_ok=True)
+    for cam_id, matrix in intrinsics.items():
+        payload = {
+            "camera": cam_id,
+            "matrix": matrix.tolist(),
+        }
+        path = target / f"{cam_id}.json"
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+
+
+REFERENCE_WORLD_POINT = np.array([0.04770101, 0.04799868, 1.28055], dtype=np.float32)
+
+
+def _validate_projection(cam_id: str, params: Dict[str, np.ndarray]) -> None:
+    """
+    Project the DeepView README reference world-space point and log the pixel
+    coordinates.  Expected result is approximately [1377.855, 1017.614].
+    """
+    world = REFERENCE_WORLD_POINT
+    R = params["R"]
+    t = params["t"]
+    point_c = R @ world + t
+    x = float(point_c[0])
+    y = float(point_c[1])
+    z = float(point_c[2])
+    r = float(np.hypot(x, y))
+    theta = float(np.arctan2(r, z))
+    if r < 1e-8:
+        theta_over_r = 1.0
+    else:
+        theta_over_r = theta / r
+    r2 = theta * theta
+    k1, k2, k3 = params["distortion"]
+    distortion = 1.0 + r2 * (float(k1) + r2 * float(k2))
+    distortion += (r2 * r2) * float(k3)
+    x_norm = theta_over_r * x * distortion
+    y_norm = theta_over_r * y * distortion
+    K_raw = params["K_raw"]
+    u = float(K_raw[0, 0] * x_norm + K_raw[0, 2])
+    v = float(K_raw[1, 1] * y_norm + K_raw[1, 2])
+    LOGGER.info("Projection check for %s -> [%.3f, %.3f]", cam_id, u, v)
+
+
+def _build_generic_provider(
     args: argparse.Namespace,
     rng: random.Random,
 ) -> tuple[io_utils.FrameProvider, List[io_utils.FrameData]]:
     requested_views = _parse_view_list(args.views)
-    num_cams = max(1, int(args.num_cams))
+    num_cams = max(1, int(args.n_views))
     if args.source == "images":
         root = args.images_live or args.images
         if root is None:
@@ -235,8 +455,8 @@ def _build_frame_provider(
             Path(root),
             num_cams=num_cams,
             requested_views=requested_views,
-            random_views=args.random_views,
-            frame_step=args.frame_step,
+            random_views=getattr(args, "random_views", 0),
+            frame_step=args.frame_stride,
             max_batches=args.max_batches,
             rng=rng,
         )
@@ -248,8 +468,8 @@ def _build_frame_provider(
             videos,
             num_cams=num_cams,
             requested_views=requested_views,
-            random_views=args.random_views,
-            frame_step=args.frame_step,
+            random_views=getattr(args, "random_views", 0),
+            frame_step=args.frame_stride,
             max_batches=args.max_batches,
             rng=rng,
         )
@@ -263,7 +483,7 @@ def _build_frame_provider(
             if missing:
                 raise RuntimeError(f"Requested webcams not available: {missing}")
             selected = {cam: webcams[cam] for cam in requested_views}
-        elif args.random_views > 0:
+        elif getattr(args, "random_views", 0) > 0:
             if args.random_views > len(webcams):
                 raise RuntimeError("Cannot sample more webcams than available.")
             chosen = rng.sample(list(webcams.keys()), args.random_views)
@@ -273,7 +493,7 @@ def _build_frame_provider(
             selected = {cam: selected[cam] for cam in chosen}
         provider = io_utils.WebcamStreamProvider(
             selected,
-            frame_step=args.frame_step,
+            frame_step=args.frame_stride,
             max_batches=args.max_batches,
         )
     else:  # pragma: no cover - parser guards choices
@@ -357,13 +577,14 @@ def bootstrap_initial_map(
     return surfels, tsdf_volume
 
 
-def run_pipeline(args: argparse.Namespace) -> None:
+def run_pipeline(args: argparse.Namespace) -> int:
+    _normalize_args(args)
     logging.basicConfig(level=getattr(logging, args.log_level))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    intrinsics = io_utils.load_intrinsics(Path(args.intrinsics))
-    poses = io_utils.load_poses(Path(args.poses))
+    rectify_width, rectify_height = map(int, args.rectify_size)
+    rectify_size = (rectify_width, rectify_height)
 
     calib_path = Path(args.per_camera_calib) if args.per_camera_calib else None
     scale_cache = io_utils.load_per_camera_calibration(calib_path)
@@ -371,10 +592,88 @@ def run_pipeline(args: argparse.Namespace) -> None:
     for cam_id, (scale, shift) in scale_cache.items():
         smoother.set_state(cam_id, scale, shift)
 
+    intrinsics: Dict[str, np.ndarray] = {}
+    poses: Dict[tuple[str, int], np.ndarray] = {}
+    resize_targets: Dict[str, Tuple[int, int]] = {}
+    raw_params: Dict[str, Dict[str, np.ndarray]] = {}
+
     rng = random.Random(args.seed)
-    provider, bootstrap_frames = _build_frame_provider(args, rng)
-    active_cams = [frame.camera_id for frame in bootstrap_frames]
-    LOGGER.info("Active cameras: %s", ", ".join(active_cams))
+    if args.dataset == "deepview":
+        if args.dataset_root is None or args.scene is None:
+            raise RuntimeError("--dataset-root and --scene are required for DeepView datasets.")
+        dataset = io_deepview.DeepViewDataset(
+            root=args.dataset_root,
+            scene=args.scene,
+            undistort=args.undistort.lower() != "off",
+            rectify_to_size=rectify_size,
+            cache_maps=args.cache_rectify_maps,
+            seed=args.seed,
+            frame_stride=args.frame_stride,
+            default_frame=args.frame_index,
+        )
+        available = dataset.list_cameras()
+        requested = _parse_view_list(args.views)
+        if requested:
+            missing = [cam for cam in requested if cam not in available]
+            if missing:
+                raise RuntimeError(f"Requested DeepView cameras not found: {missing}")
+            selected = requested[:]
+        else:
+            selected = io_deepview.select_views(
+                available,
+                args.n_views,
+                method=args.view_select,
+                seed=args.seed,
+            )
+        provider: io_utils.FrameProvider = DeepViewFrameProvider(
+            dataset,
+            selected,
+            start_frame=args.frame_index,
+            frame_stride=args.frame_stride,
+            max_batches=args.max_batches,
+        )
+        bootstrap_frames = provider.bootstrap(len(selected))
+        if not bootstrap_frames:
+            raise RuntimeError("No frames available for VGGT bootstrap.")
+        for cam_id in selected:
+            params = dataset.get_camera_params(cam_id)
+            raw_params[cam_id] = params
+            intrinsics[cam_id] = params["K"]
+            pose = np.eye(4, dtype=np.float32)
+            pose[:3, :3] = params["R"].T
+            pose[:3, 3] = params["center"]
+            poses[(cam_id, 0)] = pose
+            poses[(cam_id, args.frame_index)] = pose
+        active_cams = [frame.camera_id for frame in bootstrap_frames]
+        LOGGER.info("Active DeepView cameras: %s", ", ".join(active_cams))
+        _save_rectified_intrinsics(out_dir, intrinsics)
+        if args.validate_projection and active_cams:
+            first_cam = active_cams[0]
+            _validate_projection(first_cam, raw_params[first_cam])
+    else:
+        if args.intrinsics is None or args.poses is None:
+            raise RuntimeError("Generic datasets require --intrinsics and --poses.")
+        intrinsics_raw = io_utils.load_intrinsics(Path(args.intrinsics))
+        poses = io_utils.load_poses(Path(args.poses))
+        provider, bootstrap_frames = _build_generic_provider(args, rng)
+        if not bootstrap_frames:
+            raise RuntimeError("No frames available for VGGT bootstrap.")
+        active_cams = [frame.camera_id for frame in bootstrap_frames]
+        LOGGER.info("Active generic cameras: %s", ", ".join(active_cams))
+        for frame in bootstrap_frames:
+            cam_id = frame.camera_id
+            image = frame.image
+            h, w = image.shape[:2]
+            scale_x = rectify_width / float(w)
+            scale_y = rectify_height / float(h)
+            if (w, h) != (rectify_width, rectify_height):
+                resize_targets[cam_id] = (rectify_width, rectify_height)
+                frame.image = _resize_image(image, rectify_width, rectify_height)
+            K_raw = intrinsics_raw.get(cam_id)
+            if K_raw is None:
+                raise RuntimeError(f"Missing intrinsics for camera {cam_id}")
+            intrinsics[cam_id] = _scale_intrinsics_local(K_raw, scale_x, scale_y)
+        _save_rectified_intrinsics(out_dir, intrinsics)
 
     surfel_map, tsdf_map = _load_initial_map(
         Path(args.initial_map) if args.initial_map else None,
@@ -385,9 +684,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     if surfel_map is None and tsdf_map is None:
         if not args.test_mode:
-            raise RuntimeError("--initial_map is required unless --test_mode=1")
+            raise RuntimeError("--initial_map is required unless --test-mode=1")
         if args.vggt_engine is None:
             raise RuntimeError("--vggt_engine must be provided for test mode bootstrap")
+        LOGGER.info(
+            "VGGT input tensor shape: (1, %d, 3, %d, %d)",
+            len(bootstrap_frames),
+            rectify_height,
+            rectify_width,
+        )
         surfel_map, tsdf_map = bootstrap_initial_map(
             bootstrap_frames,
             intrinsics,
@@ -412,6 +717,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 batch_start = time.perf_counter()
                 if not batch.frames:
                     continue
+                for cam_id, frame in batch.frames.items():
+                    if cam_id in resize_targets:
+                        width, height = resize_targets[cam_id]
+                        frame.image = _resize_image(frame.image, width, height)
                 images = {cam_id: frame.image for cam_id, frame in batch.frames.items()}
                 depth_start = time.perf_counter()
                 rel_depths = depth_pool.infer_batch(images)
@@ -512,13 +821,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
         if state is not None
     }
     io_utils.save_per_camera_calibration(calib_path, persisted)
+    return 0
 
 
-def main() -> None:
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    run_pipeline(args)
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return run_pipeline(args)
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    raise SystemExit(main())

@@ -11,9 +11,9 @@ import numpy as np
 from . import trt_utils
 
 try:
-    from ..trt_inference import SimpleTrtRunner  # type: ignore
+    from ..tools.trt_inference import SimpleTrtRunner  # type: ignore
 except ImportError as exc:  # pragma: no cover
-    raise RuntimeError("onnx.trt_inference.SimpleTrtRunner is required") from exc
+    raise RuntimeError("onnx.tools.trt_inference.SimpleTrtRunner is required") from exc
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,4 +59,3 @@ class TRTVGGT:
             if "view" in name and array.ndim >= 4:
                 depth_maps.extend(array.reshape(array.shape[0], *array.shape[2:]).astype(np.float32))
         return VGGTOutput(depth_maps=depth_maps, raw_outputs=outputs)
-

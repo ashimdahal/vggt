@@ -4,9 +4,9 @@ Benchmark all TensorRT engines under onnx_exports/<quant_mode>.
 
 For each quantisation directory the script discovers *.engine files,
 measures inference latency using the optimized runner from
-`onnx/trt_inference.py`, and summarises FPS rankings. This is intended
-to help compare precision/quantisation trade-offs after running the
-conversion pipeline.
+`onnx/tools/trt_inference.py`, and summarises FPS rankings. This is
+intended to help compare precision/quantisation trade-offs after running
+the conversion pipeline.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Reuse the TensorRT runner + helpers from the existing inference script.
-from trt_inference import (  # type: ignore[import]
+from .trt_inference import (
     SimpleTrtRunner,
     ensure_c_contig,
     load_images_nchw,
