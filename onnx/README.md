@@ -22,9 +22,9 @@ Top-level helper scripts now live in `scripts/`. They reference the updated tool
 
 Minimum stack:
 
-- Python 3.9 or later
-- CUDA 12.2+ with TensorRT ≥ 10.1
-- PyTorch 2.1+ (CUDA build)
+- Python 3.12 or later
+- CUDA 12.8+ with TensorRT ≥ 10.10
+- PyTorch 2.8+ (CUDA build)
 - PyCUDA, Pillow, NumPy
 
 Optional extras:
@@ -36,7 +36,7 @@ Optional extras:
 Quick install example:
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision 
 pip install onnx onnxsim onnxruntime-gpu pycuda tensorrt pillow numpy tqdm
 pip install opencv-python
 ```
