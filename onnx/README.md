@@ -1,433 +1,179 @@
-# VGGT → TensorRT Conversion Toolkit
+# VGGT TensorRT Toolkit
 
-This directory contains a self‑contained pipeline for exporting the [facebookresearch/VGGT](https://huggingface.co/facebook/VGGT-1B) model to ONNX and compiling precision‑tuned TensorRT engines. The focus is on multi‑view inputs (e.g. 8 × 518×518 images) for downstream point‑cloud reconstruction and Gaussian splatting.
-
-The flagship script is `vggt_to_trt_chatgpt.py`, which extends the original workflow with:
-
-- Robust INT8 calibration (image/tensor datasets, GPU/CPU staging, caching)
-- Optional pre‑quantisation before ONNX export (PyTorch AoT INT8, bitsandbytes FP4/FP8/NF4, NVIDIA ModelOpt FP8)
-- Precision introspection so FP8/INT8 fallback is detected automatically
-- Safe opset repair + resilient ONNX simplification
-- Configurable PCD‑only export that retains just depth & camera heads for point‑cloud inference
-
-Use this document as a detailed reference for setup, configuration, and troubleshooting.
+This directory bundles everything needed to export `facebook/VGGT-1B` to ONNX/TensorRT and to run live multi-view reconstruction. The goal is to stay within `onnx/` for export, benchmarking, and runtime pipelines, while the rest of the repository focuses on higher-level demos and training.
 
 ---
 
-## 1. Repository Layout
+## 1. Directory Map
 
-| Path | Description |
+| Path | Purpose |
 | --- | --- |
-| `vggt_to_trt_chatgpt.py` | Main conversion pipeline (this doc covers it exhaustively) |
-| `vggt_to_trt.py` / `vggt_to_trt_faster.py` | Earlier conversion variants (kept for comparison) |
-| `pcd_inference.py` | Example point cloud inference harness using compiled engines |
-| `pcd_to_3dgs.py` | Early experiments toward 3D Gaussian Splatting (context only) |
-| `trt_inference.py` | Generic TensorRT inference utility |
-| `onnx_exports/` | Default output directory for exported ONNX models and TensorRT engines |
-| `logs/export_logs.txt` | Log from the last conversion run (useful for regression comparisons) |
+| `inference_pcd.py` | End-to-end point-cloud reconstruction (bootstrap with VGGT, stream Depth Anything). |
+| `pcd/` | Support modules: alignment, fusion, IO helpers, raycasting, TRT wrappers, Depth Anything pool. |
+| `tools/` | Standalone CLI utilities for export, inference, benchmarking, and 3DGS experiments. |
+| `logs/` | Build & runtime logs (e.g. `logs/out.txt` summarises the latest benchmark sweep). |
+| `onnx_exports/` | Populated after exports; holds ONNX graphs, TensorRT engines, tactic caches. |
+
+Top-level helper scripts now live in `scripts/`. They reference the updated tool locations—see §7.
 
 ---
 
-## 2. Prerequisites
+## 2. Environment Setup
 
-### 2.1 Core Requirements
+Minimum stack:
 
-| Component | Minimum Version | Notes |
-| --- | --- | --- |
-| Python | 3.9+ | Tested with Python 3.10 |
-| CUDA Toolkit | 12.2+ | Required for TensorRT 10 and ModelOpt FP8 recipes |
-| TensorRT | 10.1+ | Script relies on BuilderFlag changes and new calibration APIs |
-| PyTorch | 2.1+ | Must match CUDA version; inference/export uses `torch.onnx.export` |
-| ONNX | 1.15+ | Reading/writing ONNX with external data |
+- Python 3.9 or later
+- CUDA 12.2+ with TensorRT ≥ 10.1
+- PyTorch 2.1+ (CUDA build)
+- PyCUDA, Pillow, NumPy
 
-Install base packages (modify versions to match your environment):
+Optional extras:
+
+- OpenCV (`pip install opencv-python`) for video/webcam streaming.
+- CuPy / Open3D for GPU preprocessing and visualisation in `tools/inference_depth_anything.py`.
+- bitsandbytes or NVIDIA ModelOpt when experimenting with low-precision quant modes.
+
+Quick install example:
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install onnx onnxruntime-gpu onnxsim pillow tqdm
-pip install tensorrt==10.1.0.13
+pip install onnx onnxsim onnxruntime-gpu pycuda tensorrt pillow numpy tqdm
+pip install opencv-python
 ```
-
-> **Tip:** TensorRT wheels often ship separately from PyPI. Use NVIDIA’s `python/tensorrt` wheel matching your CUDA driver.
-
-### 2.2 Optional Quantisation Backends
-
-| Mode | Extra Dependencies | When to Use |
-| --- | --- | --- |
-| `bitsandbytes-8bit` | `pip install bitsandbytes` | Quantise linear layers to 8‑bit (`Linear8bitLt`) before ONNX export |
-| `bitsandbytes-nf4` / `bitsandbytes-fp4` | `bitsandbytes` (GPU or MPS support) | Weight‑only 4‑bit pre‑quantisation for experimentation with ultra‑low precision |
-| `modelopt-fp8` | `pip install modelopt` (CUDA 12.2+) | NVIDIA’s FP8 recipe; recommended when TensorRT FP8 fallback is too aggressive |
-| `torch-int8-dynamic` | `torch` with quantisation enabled | CPU‑friendly dynamic INT8 path; helpful for export stability |
 
 ---
 
-## 3. Quick Start
+## 3. Exporting VGGT to TensorRT
+
+Use `onnx/tools/vggt_to_trt.py` to export ONNX models and build TensorRT engines.
 
 ```bash
-python vggt_to_trt_chatgpt.py \
+python onnx/tools/vggt_to_trt.py \
   --export \
-  --num-cams 8 \
-  --precision fp16
+  --model-name facebook/VGGT-1B \
+  --num-cams 8 --height 518 --width 518 \
+  --precision fp16 \
+  --pcd-only \
+  --output-dir onnx_exports/none
 ```
 
-This exports `facebook/VGGT-1B` to ONNX (with external weights) and builds a FP16 TensorRT engine under `onnx_exports/`.
+Key parameters:
 
-### 3.1 Using an Existing ONNX
+- `--quant-mode`: `none`, `torch-int8-dynamic`, `bitsandbytes-8bit`, `bitsandbytes-nf4`, `bitsandbytes-fp4`, `modelopt-fp8`, `modelopt-nvfp4`.
+- `--all-precisions`: build FP16/BF16/FP8/INT8 after a single export.
+- `--calib-data` + `--calib-batches`: drive INT8 calibration (directories, globs, or `.npy` tensors).
+- `--pcd-only`: strips the classifier heads to keep depth + camera outputs (smaller/faster engines).
+
+Artifacts are placed in `onnx_exports/<quant_mode>/` with filenames like `vggt-8x3x518x518-pcd_fp16.engine`.
+
+---
+
+## 4. Live Point-Cloud Reconstruction
+
+`inference_pcd.py` performs a two-phase loop:
+
+1. **Bootstrap** — runs VGGT on `--num_cams` frames to produce a metric point cloud (surfel or TSDF).
+2. **Streaming** — processes subsequent frames with Depth Anything v2, aligns relative depth to the map, and fuses them.
+
+### 4.1 Inputs
+
+- `--source images` *(default)*: PKU-style image folders; use `--images` (and optionally `--images_live`).
+- `--source videos`: per-camera video files (flat directory or per-camera subdirectories).
+- `--source webcams`: multiple USB/PCIe cameras (`--webcams 0 1 2` or `front=0 left=1` syntax).
+
+### 4.2 Controls
+
+- `--views` or `--random_views`: choose deterministic cameras or sample a subset each run.
+- `--frame_step`: process every Nth frame (useful for high-FPS videos/webcams).
+- `--depth_workers`: number of Depth Anything TensorRT workers (defaults to `num_cams`).
+- `--fusion`: `surfel` *(append surfels)* or `tsdf` *(integrate into TSDF grid)*.
+- `--per_camera_calib`: persist scale/shift alignment to JSON for smoother future runs.
+
+### 4.3 Example
 
 ```bash
-python vggt_to_trt_chatgpt.py \
-  --onnx-in onnx_exports/vggt-8x3x518x518.onnx \
-  --precision int8 \
-  --calib-data /path/to/mvs/images \
-  --calib-batches 32
+python -m onnx.inference_pcd \
+  --source videos \
+  --videos data/dome_videos \
+  --num_cams 8 --random_views 8 \
+  --intrinsics config/dome_intrinsics.npz \
+  --poses config/dome_poses.npz \
+  --vggt_engine onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_int8.engine \
+  --depth_engine_dir onnx_exports/depth_anything \
+  --frame_step 2 \
+  --out_dir outputs/dome_session \
+  --test_mode 1
 ```
 
-Set `--export` only when you need to regenerate the ONNX from Hugging Face.
+Outputs include:
+
+- `bootstrap_map.ply` and `map_updated.ply` (metric surfel clouds).
+- `tsdf_volume.npz` (when `--fusion tsdf`).
+- `metrics.json` (per-camera alignment residuals, scale/shift, timings).
+- Optional `depth_metric/*.npz` when `--save_per_frame_depth` is enabled.
 
 ---
 
-## 4. Command Reference
+## 5. Depth Anything TensorRT Pool
 
-`python vggt_to_trt_chatgpt.py [options]`
+`pcd/depth_anything.py` manages a worker pool that:
 
-### 4.1 Input & Output
+- Spins up one TensorRT execution context per thread (with dedicated CUDA contexts).
+- Accepts RGB images, handles resizing, and returns float32 depth maps.
+- Respects the original resolution when emitting depth (automatic resize back).
+- Is resilient to FP16/BF16/INT8 engine variants.
 
-| Flag | Description |
+`inference_pcd.py` uses it automatically, but you can import `DepthAnythingPool` for custom pipelines if needed.
+
+---
+
+## 6. Additional Tools
+
+| Command | Description |
 | --- | --- |
-| `--export` | Export VGGT from Hugging Face first (otherwise reuse `--onnx-in`) |
-| `--onnx-in PATH` | Existing ONNX model (skips export) |
-| `--output-dir DIR` | Root directory for ONNX/engine/timing cache (default: `onnx_exports`) |
-
-### 4.2 Model Geometry
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--num-cams` | `8` | Number of camera views (batch dimension) |
-| `--height` | `518` | Input height (VGGT requires 518×518) |
-| `--width` | `518` | Input width |
-| `--pcd-only` | off | Keep only depth + camera heads (optimised for point cloud inference) |
-| `--model-name` | `facebook/VGGT-1B` | Hugging Face identifier |
-| `--opset` | `18` | ONNX opset version |
-
-### 4.3 Precision Options
-
-| Flag | Values | Description |
-| --- | --- | --- |
-| `--precision` | `fp16` (default), `fp32`, `bf16`, `fp8`, `int8` | Target TensorRT precision |
-| `--all-precisions` | (flag) | Build FP16 + BF16 + FP8 + INT8 sequentially |
-| `--quant-mode` | see below | Apply pre‑quantisation before ONNX export |
-
-Supported `--quant-mode` values:
-
-- `none`: vanilla export (default)
-- `torch-int8-dynamic`: PyTorch dynamic INT8 modules (CPU-centric)
-- `bitsandbytes-8bit`: Replace `nn.Linear` with `Linear8bitLt`
-- `bitsandbytes-nf4`: Weight‑only NF4 quantisation
-- `bitsandbytes-fp4`: Weight‑only FP4 quantisation
-- `modelopt-fp8`: NVIDIA ModelOpt FP8 recipe (requires CUDA + `modelopt`)
-
-### 4.4 TensorRT Build Controls
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--workspace-gb` | `32` | TensorRT builder workspace (GB) |
-| `--opt-level` | `5` | Builder optimisation level (0–5) |
-| `--max-aux-streams` | `4` | Auxiliary CUDA streams |
-| `--no-simplify` | off | Skip ONNX simplification (fallback path) |
-
-### 4.5 INT8 Calibration
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--calib-data PATH/GLOB/NPY` | `None` | Calibration source (images or tensor file) |
-| `--calib-batches` | `32` | Number of batches to feed calibrator |
-| `--calib-seed` | `1337` | RNG seed for sample shuffling or synthetic data |
-| `--calib-cpu` | off | Force CPU staging (otherwise GPU buffer if available) |
-
-**Accepted sources**
-
-- Directory with images (`.jpg`, `.png`, `.tif`, …) — recursively scanned via `Path.rglob`
-- Glob pattern (e.g. `data/mvs360/*.png`)
-- NumPy tensor (`.npy` or `.npz`) shaped either `(B, num_cams, 3, H, W)` or `(N, 3, H, W)`
-- `None` → synthetic Gaussian noise (fallback, but weaker accuracy)
-
-Calibration batches always match the expected input shape `(num_cams, 3, H, W)`. If the dataset is smaller than required, it is re-sampled with replacement and cached in memory.
+| `python onnx/tools/trt_inference.py --engine <engine>` | Benchmark a single TensorRT engine (real images or synthetic). |
+| `python onnx/tools/benchmark_trt_engines.py --root onnx_exports` | Compare FPS/latency across all engines under `onnx_exports/`. |
+| `python onnx/tools/inference_depth_anything.py --engine onnx_exports/depth_anything/depth_rtl.engine` | Dual-camera Depth Anything demo with visualization helpers. |
+| `python onnx/tools/pcd_inference.py ...` | Legacy reference pipeline (kept for compatibility/testing). |
+| `python onnx/tools/pcd_to_3dgs.py ...` | Seeds future 3D Gaussian Splatting experiments using exported PCDs. |
 
 ---
 
-## 5. Pipeline Stages
+## 7. Automation Scripts
 
-1. **Export (optional)** — Loads VGGT, applies pre‑quantisation if requested, exports to ONNX with external weights, and prunes outputs for PCD-only mode.
-2. **Sequence removal** — Rewrites `SequenceAt`/`SplitToSequence` constructs into pure tensor ops (TensorRT cannot parse ONNX sequences).
-3. **Simplification** — Runs `onnxsim.simplify` with conservative settings (skipped automatically if unavailable or if simplification fails).
-4. **Validation** — `onnx.checker.check_model` verifies graph consistency.
-5. **TensorRT build** — Parses the ONNX graph, configures builder flags per precision, loads timing cache, sets up INT8 calibration, and serialises the engine.
-6. **Precision inspection** — Deserialises the engine in-memory to report actual tensor data types (helps spot FP8/INT8 fallbacks).
+Located at the repo root:
 
-Intermediate artefacts:
+- `scripts/run_all_exports.sh` — sweeps every quant mode and builds FP16/BF16/FP8/INT8 engines. It uses `onnx/tools/vggt_to_trt.py` and optionally benchmarks with `onnx/tools/benchmark_trt_engines.py`.
+- `scripts/run_all_precisions.sh` — focuses on a single configuration, exporting (optional) and benchmarking via `onnx/tools/vggt_to_trt.py` and `onnx/tools/trt_inference.py`.
 
-| File | Purpose |
-| --- | --- |
-| `<stem>.onnx` | Raw export (kept when `--export` is used) |
-| `<stem>.NOSEQ.onnx` | Sequence-free ONNX fed to simplifier |
-| `<stem>.simp.onnx` | Final ONNX used for TensorRT compilation |
-| `<stem>_<prec>.engine` | Serialized TensorRT engine |
-| `trt_timing.cache` | Timing cache reused across builds |
-| `calibration-*.cache` | INT8 calibration cache (per shape) |
-
-The stem defaults to `vggt-{N}x3x{H}x{W}` with `-pcd` appended for PCD-only exports.
+Both scripts honour environment variables (`NUM_CAMS`, `CALIB_DATA`, `PCD_ONLY`, etc.) and append consolidated output to `onnx/logs/out.txt`.
 
 ---
 
-## 6. Working with Quantisation Modes
+## 8. Outputs & Logging
 
-### 6.1 PyTorch Dynamic INT8 (`torch-int8-dynamic`)
-- Runs quantisation on CPU; sets `torch.onnx.export` to CPU mode.
-- Uses `torch.ao.quantization.quantize_dynamic` on Linear / LSTM / GRU layers.
-- Helpful when TensorRT INT8 calibration cannot be performed (quick CPU experiments).
+- `onnx_exports/<quant_mode>/`: ONNX graphs (`*.onnx`), engines (`*.engine`), INT8 caches, timing caches.
+- `logs/build_*.log`, `logs/infer_*.log`: per-run diagnostics.
+- `logs/out.txt`: rolling summary of benchmark results (handy for comparing sweeps).
+- `outputs/<session>/`: written by `inference_pcd.py` (maps, TSDF volumes, depth archives, metrics).
 
-### 6.2 bitsandbytes Modes
-- Require GPU (CUDA) or Apple MPS — enforced by runtime checks.
-- Replace `nn.Linear` modules with `Linear8bitLt` or `Linear4bit`.
-- Weight initialisation copies state dicts; warnings are printed if bitsandbytes rejects the load and manual weight copy is used.
-- ONNX export support for these custom modules is still evolving. Use for experimentation with PyTorch inference or convert with ModelOpt if TensorRT rejects custom ops.
-
-### 6.3 NVIDIA ModelOpt FP8 (`modelopt-fp8`)
-- Leverages `modelopt.torch.quantization.quantize_model` with a FP8 recipe.
-- Requires CUDA 12.2+, TensorRT 10, and `modelopt>=0.9`.
-- Unlocks better FP8 utilisation when direct TensorRT compilation falls back to FP16.
-
----
-
-## 7. Calibration Data Preparation
-
-1. **Gather frames** — For INT8 accuracy, use representative multi-view image sets (MVS benchmarks, etc.).
-2. **Resize** — The pipeline resizes automatically to the declared `--height/--width`, but providing native 518×518 images avoids interpolation artifacts.
-3. **Organise** — Point `--calib-data` at the directory root (recursive search) or a glob (`scene*/view*.png`).
-4. **Tune batches** — Set `--calib-batches` high enough to cover dataset variance (16–64 typically). Each batch pulls `num_cams` views.
-5. **Reuse caches** — `calibration-<shape>.cache` is written under `--output-dir`. Delete it to refresh calibration.
-
-When calibration fails (missing files, bitsandbytes not installed, etc.), the pipeline falls back to synthetic Gaussian noise with a warning. Examine logs carefully because engines built without calibration rarely achieve the expected INT8 speed/accuracy trade-off.
-
----
-
-## 8. Monitoring Precision & Fallbacks
-
-At the end of each build the script prints an engine precision summary similar to:
-
-```
-[INFO] Engine tensor precisions: FP16:812, FP32:6
-[WARNING] FP8 requested but engine contains no FP8 tensors; TensorRT likely fell back to FP16/FP32.
-```
-
-Interpretation:
-- **FP8 build shows no FP8 tensors** → Most layers lacked kernel support; switch to `--quant-mode modelopt-fp8` or try INT8.
-- **INT8 build lacks INT8 tensors** → Calibration didn’t run (check for calibration warnings and ensure BuilderFlag.INT8 was set).
-
-This quick diagnostic prevents silent fallbacks where file sizes look similar (e.g. FP8 engine same size as FP16).
+When engines show unexpected performance, inspect `logs/out.txt` and the per-engine logs; INT8 should currently achieve ~157 ms for VGGT PCD on RTX 5090 with PCIe storage.
 
 ---
 
 ## 9. Troubleshooting
 
-| Symptom | Likely Cause | Fix |
-| --- | --- | --- |
-| `Simplification failed: model with IR version >= 3 must specify opset_import` | Opset metadata missing or onnxsim bug | Script now repairs opset, but if it persists run with `--no-simplify` |
-| `Unsupported data type FP8` warnings | Expected on consumer GPUs | Ignore, but note engine may revert to FP16 (see precision summary) |
-| INT8 calibrator `RuntimeError: size mismatch` | Calibration batches wrong shape | Ensure dataset produces `(num_cams, 3, H, W)` arrays (script logs shapes) |
-| bitsandbytes import errors | Package not installed or backend unavailable | Install `bitsandbytes` and ensure CUDA/MPS; otherwise choose another quant mode |
-| ModelOpt errors | CUDA < 12.2 or missing `modelopt` | Upgrade CUDA / install `modelopt`, or fall back to pure TensorRT FP8 |
-| TensorRT parsing fails | Remaining sequence ops or unsupported node | Inspect `onnx_exports/*.NOSEQ.onnx`; ensure sequence removal succeeded |
-
-Check `logs/export_logs.txt` for historical context when comparing runs.
+- **Exporter fails during simplification**: rerun with `--no-simplify`, or set `FORCE_SIMPLIFY=0` when using the helper scripts; the pipeline re-attempts without simplification automatically.
+- **Depth alignment unstable**: start with `--test_mode 1` to regenerate a clean bootstrap map and keep `--smooth_scale` near 0.1 for gradual updates. Store calibration JSON via `--per_camera_calib`.
+- **Webcam frame drops**: reduce `--depth_workers`, increase `--frame_step`, or lower USB resolution/FPS using `v4l2-ctl` before launching the pipeline.
+- **INT8 accuracy off**: ensure calibration data matches VGGT input geometry `(num_cams, 3, 518, 518)` and delete stale caches in `onnx_exports/<quant_mode>/*.cache`.
 
 ---
 
-## 10. Integrating with Point-Cloud / 3DGS Pipelines
+## 10. Next Steps
 
-- **PCD-only mode** (`--pcd-only`) keeps outputs relevant for depth and camera estimation, reducing engine size and speeding up inference by ~30%.
-- Use `trt_inference.py` or `pcd_inference.py` as references for feeding batched multi-view tensors into TensorRT engines and constructing point clouds.
-- Planned 3D Gaussian Splatting flow (`pcd_to_3dgs.py`) expects consistent depth/camera outputs from the engine; verifying matching shapes after quantisation is recommended.
+- Integrate `pcd_to_3dgs.py` once your point clouds look good; the TSDF exports already encode fused geometry.
+- When experimenting with new quantisation strategies, wire them through `scripts/run_all_exports.sh` for reproducibility.
+- Consider adding regression tests that exercise the new frame providers (`pcd/io_utils.py`) once you have deterministic sample data.
 
----
-
-## 11. Live PCD Inference (Videos / Webcams)
-
-`onnx/inference_pcd.py` now supports three capture modes so you can run VGGT + Depth Anything on multi-view datasets or live camera rigs without writing glue code.
-
-- `--source images` *(default)* consumes PKU-style frame directories. Use `--images` to point at the scene root and `--views` (comma separated) or `--random_views 8` to pick the 8 bootstrap cameras. Frames are streamed in lock-step so temporal alignment is preserved.
-- `--source videos` expects one video per camera (`camXX.mp4`, or subdirectories). Pass `--videos /path/to/videos` and the script will spawn a TensorRT worker per camera, reading and fusing frames at the requested `--frame_step`.
-- `--source webcams` opens multiple USB/PCIe cameras simultaneously. Provide `--webcams 0 1 2 3 4 5 6 7` (or named specs like `front=0`). A per-worker TensorRT engine keeps the Depth Anything inference threads independent.
-
-Shared options:
-
-- `--num_cams` sets how many viewpoints are used for VGGT initialisation and live updates (default: 8).
-- `--depth_workers` overrides the number of Depth Anything TensorRT engines (defaults to `num_cams`).
-- `--frame_step` skips intermediate frames for high-FPS streams; `--max_batches` bounds the live processing loop.
-- `--views`/`--random_views` coexist with all source types so you can preselect a camera subset or sample different domes on each run.
-
-Example invocations:
-
-```bash
-# PKU-style dataset with deterministic view selection
-python -m onnx.inference_pcd \
-  --source images \
-  --images data/pku_scene \
-  --views cam001,cam005,cam012,cam020,cam024,cam028,cam033,cam040 \
-  --intrinsics configs/pku_intrinsics.json \
-  --poses configs/pku_poses.json \
-  --vggt_engine onnx_exports/none/vggt-8x3x518x518-pcd_fp16.engine \
-  --out_dir outputs/pku_scene
-
-# Video capture (picks first eight cameras automatically)
-python -m onnx.inference_pcd \
-  --source videos \
-  --videos data/dome_videos \
-  --num_cams 8 \
-  --random_views 8 \
-  --frame_step 2 \
-  --intrinsics configs/dome_intrinsics.npz \
-  --poses configs/dome_poses.npz \
-  --vggt_engine onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_int8.engine \
-  --depth_engine_dir onnx_exports/depth_anything \
-  --out_dir outputs/dome_run
-
-# Eight live webcams on an RTX 5090
-python -m onnx.inference_pcd \
-  --source webcams \
-  --webcams front=0 back=1 left=2 right=3 down=4 up=5 aux1=6 aux2=7 \
-  --num_cams 8 \
-  --intrinsics configs/webcam_intrinsics.yaml \
-  --poses configs/webcam_poses.yaml \
-  --initial_map outputs/bootstrap_map.ply \
-  --depth_workers 8 \
-  --out_dir outputs/webcam_session
-```
-
-Notes:
-
-- Video/webcam modes require OpenCV (`pip install opencv-python`). Image mode continues to rely on Pillow.
-- The Depth Anything pool spins up one TensorRT context per worker, so budget ~1.5 GB VRAM per engine.
-- Per-camera scale/shift smoothing remains compatible; reuse `--per_camera_calib` across runs for faster convergence.
-
----
-
-## 12. onnx_exports Directory Overview
-
-Exports are organised by quantisation strategy so you can quickly inspect or benchmark specific precisions:
-
-| Directory | Contents |
-| --- | --- |
-| `onnx_exports/none/` | Baseline VGGT PCD engines (FP32/FP16/BF16/FP8/INT8). |
-| `onnx_exports/bitsandbytes-8bit/` | Weight-quantised variants with downstream FP16/BF16/FP8/INT8 TensorRT builds. |
-| `onnx_exports/bitsandbytes-fp4/` | FP4 weight-only exports, matching suffix conventions (`_fp16.engine`, etc.). |
-| `onnx_exports/bitsandbytes-nf4/` | NF4 weight-only exports. |
-| `onnx_exports/modelopt-fp8/` | ModelOpt-assisted FP8 pipelines alongside fallback precisions. |
-| `onnx_exports/torch-int8-dynamic/` | Torch dynamic INT8 pre-quantisation; best performing INT8 build (≈6.37 FPS for VGGT PCD). |
-| `onnx_exports/depth_anything/` | Depth Anything v2 TensorRT engines (e.g., `depth_rtl.engine`) consumed by the live pipeline. |
-
-Engine filenames follow `vggt-8x3x518x518-pcd_<precision>.engine` which encodes the view count and tensor layout. For quick performance references, `onnx/logs/out.txt` captures the latest benchmark sweep (INT8 currently leads at ~157 ms per VGGT pass).
-
----
-
-## 13. Example Workflows
-
-### 11.1 Multi-precision Export
-
-```bash
-python vggt_to_trt_chatgpt.py \
-  --export \
-  --num-cams 8 \
-  --all-precisions \
-  --calib-data data/mvs360 \
-  --calib-batches 48
-```
-
-Builds FP16, BF16, FP8, and INT8 engines sequentially, reusing the first exported ONNX.
-
-### 11.2 FP8 with ModelOpt + PCD Mode
-
-```bash
-python vggt_to_trt_chatgpt.py \
-  --export \
-  --num-cams 8 \
-  --pcd-only \
-  --precision fp8 \
-  --quant-mode modelopt-fp8
-```
-
-Optimised for live point-cloud reconstruction when native TensorRT FP8 support is inadequate.
-
-### 11.3 INT8 Calibration from NumPy Tensor
-
-```bash
-python vggt_to_trt_chatgpt.py \
-  --onnx-in onnx_exports/vggt-8x3x518x518.onnx \
-  --precision int8 \
-  --calib-data calibration_batches.npy \
-  --calib-batches 64 \
-  --calib-cpu
-```
-
-`calibration_batches.npy` should contain either `(64, 8, 3, 518, 518)` or `(512, 3, 518, 518)` arrays.
-
----
-
-## 14. Automation Script (`scripts/run_all_exports.sh`)
-
-A helper shell script (`run_all_exports.sh`) is provided to sweep every supported quantisation mode and TensorRT precision. Move it to your preferred location (for example `scripts/run_all_exports.sh`) and make it executable:
-
-```bash
-chmod +x run_all_exports.sh
-```
-
-By default it iterates over:
-
-- Quant modes: `none`, `torch-int8-dynamic`, `bitsandbytes-8bit`, `bitsandbytes-nf4`, `bitsandbytes-fp4`, `modelopt-fp8`
-- Precisions: FP16, BF16, FP8, INT8 (via `--all-precisions`), plus a separate FP32 build
-
-Environment variables let you customise the run without editing the script:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PYTHON` | `python` | Python executable |
-| `NUM_CAMS` / `HEIGHT` / `WIDTH` | `8 / 518 / 518` | Input shape |
-| `MODEL` | `facebook/VGGT-1B` | Hugging Face model name |
-| `BASE_OUTPUT` | `onnx_exports` | Root output directory (`$BASE_OUTPUT/<quant_mode>/…`) |
-| `CALIB_DATA` | *(empty)* | Calibration dataset (dir/glob/.npy) |
-| `CALIB_BATCHES` / `CALIB_SEED` | `32 / 1337` | Calibration controls |
-| `CALIB_CPU` | `0` | Set to `1` to stage calibration batches on CPU |
-| `PCD_ONLY` | `0` | Set to `1` for depth+camera exports |
-| `EXTRA_ARGS` | *(empty)* | Additional CLI flags passed to every invocation |
-
-Example usage:
-
-```bash
-CALIB_DATA=data/mvs360 \
-CALIB_BATCHES=48 \
-BASE_OUTPUT=onnx_sweep \
-./run_all_exports.sh
-```
-
-The script stops on the first failing configuration. Check its console output and the generated subdirectories for per-mode logs and engines.
-
----
-
-## 15. Maintenance Notes
-
-- The worktree may already be dirty (tracked in `git status`). Avoid overwriting custom changes unless intentional.
-- Delete `onnx_exports/*.cache` if you change calibration data or tactics.
-- To re-export ONNX with a different quant mode, pass `--export --quant-mode <mode>`; the script handles device switching automatically.
-- Logs are verbose by design; they surface key warnings (fallbacks, missing opset, calibration issues).
-
----
-
-## 16. References
-
-- [VGGT Paper](https://arxiv.org/abs/2311.01879)
-- [facebookresearch/VGGT repository](https://github.com/facebookresearch/VGGT)
-- [TensorRT Documentation](https://docs.nvidia.com/deeplearning/tensorrt/)
-- [NVIDIA ModelOpt](https://github.com/NVIDIA/modelopt)
-- [bitsandbytes](https://github.com/TimDettmers/bitsandbytes)
-
-Happy converting! Tune calibration data, experiment with quant modes, and keep an eye on the precision summaries to ensure your engines utilise the expected numeric formats.
+Happy reconstructing!
