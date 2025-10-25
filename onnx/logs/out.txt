@@ -1,0 +1,134 @@
+[10/24/2025-21:09:34] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:11:26] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:11:53] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:12:15] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:14:27] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:14:49] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:16:42] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:17:09] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:17:31] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:19:48] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:20:09] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:22:02] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:22:29] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:22:51] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:25:03] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:25:24] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:25:51] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:26:12] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:26:35] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:28:27] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:28:55] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:29:17] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:31:34] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:31:56] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:33:48] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:34:15] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:34:38] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+[10/24/2025-21:36:55] [TRT] [W] hasImplicitBatchDimension is deprecated and always return false.
+
+[INFO] Benchmarking quantisation mode 'bitsandbytes-8bit'
+[INFO] Loaded engine: onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd.engine
+fp32 → 1.09 FPS (920.37 ± 2.05 ms)  [vggt-8x3x518x518-pcd.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.65 FPS (214.86 ± 0.07 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.22 FPS (160.81 ± 0.48 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 0.92 FPS (1088.54 ± 1.92 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_int8.engine
+int8 → 6.35 FPS (157.48 ± 0.47 ms)  [vggt-8x3x518x518-pcd_int8.engine]
+
+[INFO] Benchmarking quantisation mode 'bitsandbytes-fp4'
+[INFO] Loaded engine: onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd.engine
+fp32 → 1.08 FPS (925.18 ± 0.84 ms)  [vggt-8x3x518x518-pcd.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.64 FPS (215.46 ± 0.75 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.19 FPS (161.47 ± 0.58 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 0.89 FPS (1123.26 ± 2.41 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_int8.engine
+int8 → 6.35 FPS (157.51 ± 0.56 ms)  [vggt-8x3x518x518-pcd_int8.engine]
+
+[INFO] Benchmarking quantisation mode 'bitsandbytes-nf4'
+[INFO] Loaded engine: onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd.engine
+fp32 → 1.08 FPS (924.12 ± 0.74 ms)  [vggt-8x3x518x518-pcd.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.71 FPS (212.22 ± 0.07 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.21 FPS (160.94 ± 0.45 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 0.92 FPS (1086.93 ± 2.01 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+[INFO] Loaded engine: onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_int8.engine
+int8 → 6.36 FPS (157.31 ± 0.52 ms)  [vggt-8x3x518x518-pcd_int8.engine]
+
+[INFO] Benchmarking quantisation mode 'modelopt-fp8'
+[INFO] Loaded engine: onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.65 FPS (214.86 ± 0.08 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.20 FPS (161.25 ± 0.57 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 6.18 FPS (161.88 ± 0.58 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+
+[INFO] Benchmarking quantisation mode 'none'
+[INFO] Loaded engine: onnx_exports/none/vggt-8x3x518x518-pcd.engine
+fp32 → 1.08 FPS (927.03 ± 0.84 ms)  [vggt-8x3x518x518-pcd.engine]
+[INFO] Loaded engine: onnx_exports/none/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.65 FPS (215.23 ± 0.08 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/none/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.20 FPS (161.22 ± 0.49 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/none/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 0.89 FPS (1127.35 ± 2.82 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+[INFO] Loaded engine: onnx_exports/none/vggt-8x3x518x518-pcd_int8.engine
+int8 → 6.35 FPS (157.46 ± 0.51 ms)  [vggt-8x3x518x518-pcd_int8.engine]
+
+[INFO] Benchmarking quantisation mode 'torch-int8-dynamic'
+[INFO] Loaded engine: onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd.engine
+fp32 → 1.08 FPS (923.78 ± 0.61 ms)  [vggt-8x3x518x518-pcd.engine]
+[INFO] Loaded engine: onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_bf16.engine
+bf16 → 4.71 FPS (212.37 ± 0.19 ms)  [vggt-8x3x518x518-pcd_bf16.engine]
+[INFO] Loaded engine: onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_fp16.engine
+fp16 → 6.18 FPS (161.74 ± 0.46 ms)  [vggt-8x3x518x518-pcd_fp16.engine]
+[INFO] Loaded engine: onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_fp8.engine
+fp8 → 0.88 FPS (1130.94 ± 3.25 ms)  [vggt-8x3x518x518-pcd_fp8.engine]
+[INFO] Loaded engine: onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_int8.engine
+int8 → 6.37 FPS (157.09 ± 0.64 ms)  [vggt-8x3x518x518-pcd_int8.engine]
+
+=== TensorRT Engine Benchmark Summary ===
+Rank       FPS     Latency(ms)               Quant  Precision  Engine
+---------------------------------------------------------------------
+   1      6.37          157.09  torch-int8-dynamic       int8  onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_int8.engine
+   2      6.36          157.31    bitsandbytes-nf4       int8  onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_int8.engine
+   3      6.35          157.48   bitsandbytes-8bit       int8  onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_int8.engine
+   4      6.35          157.51    bitsandbytes-fp4       int8  onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_int8.engine
+   5      6.35          157.46                none       int8  onnx_exports/none/vggt-8x3x518x518-pcd_int8.engine
+   6      6.22          160.81   bitsandbytes-8bit       fp16  onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_fp16.engine
+   7      6.21          160.94    bitsandbytes-nf4       fp16  onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_fp16.engine
+   8      6.20          161.25        modelopt-fp8       fp16  onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_fp16.engine
+   9      6.20          161.22                none       fp16  onnx_exports/none/vggt-8x3x518x518-pcd_fp16.engine
+  10      6.19          161.47    bitsandbytes-fp4       fp16  onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_fp16.engine
+  11      6.18          161.88        modelopt-fp8        fp8  onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_fp8.engine
+  12      6.18          161.74  torch-int8-dynamic       fp16  onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_fp16.engine
+  13      4.71          212.22    bitsandbytes-nf4       bf16  onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_bf16.engine
+  14      4.71          212.37  torch-int8-dynamic       bf16  onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_bf16.engine
+  15      4.65          214.86   bitsandbytes-8bit       bf16  onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_bf16.engine
+  16      4.65          214.86        modelopt-fp8       bf16  onnx_exports/modelopt-fp8/vggt-8x3x518x518-pcd_bf16.engine
+  17      4.65          215.23                none       bf16  onnx_exports/none/vggt-8x3x518x518-pcd_bf16.engine
+  18      4.64          215.46    bitsandbytes-fp4       bf16  onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_bf16.engine
+  19      1.09          920.37   bitsandbytes-8bit       fp32  onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd.engine
+  20      1.08          925.18    bitsandbytes-fp4       fp32  onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd.engine
+  21      1.08          924.12    bitsandbytes-nf4       fp32  onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd.engine
+  22      1.08          927.03                none       fp32  onnx_exports/none/vggt-8x3x518x518-pcd.engine
+  23      1.08          923.78  torch-int8-dynamic       fp32  onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd.engine
+  24      0.92         1088.54   bitsandbytes-8bit        fp8  onnx_exports/bitsandbytes-8bit/vggt-8x3x518x518-pcd_fp8.engine
+  25      0.92         1086.93    bitsandbytes-nf4        fp8  onnx_exports/bitsandbytes-nf4/vggt-8x3x518x518-pcd_fp8.engine
+  26      0.89         1123.26    bitsandbytes-fp4        fp8  onnx_exports/bitsandbytes-fp4/vggt-8x3x518x518-pcd_fp8.engine
+  27      0.89         1127.35                none        fp8  onnx_exports/none/vggt-8x3x518x518-pcd_fp8.engine
+  28      0.88         1130.94  torch-int8-dynamic        fp8  onnx_exports/torch-int8-dynamic/vggt-8x3x518x518-pcd_fp8.engine
+
+Fastest configuration:
+  torch-int8-dynamic / int8 → 6.37 FPS (157.09 ms)
+
+≥30 FPS configurations: 0
+≥15 FPS configurations: 0
