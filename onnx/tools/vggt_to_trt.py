@@ -1227,7 +1227,28 @@ class VGGTPipeline:
             # Keep camera params and depth outputs
             if "cat_322" in name or "view_411" in name or "view_412" in name:
                 keep_outputs.append(output)
-                logger.info(f"  Keeping output: {name}")
+                dims = []
+                tt = output.type.tensor_type
+                for dim in tt.shape.dim:
+                    if dim.HasField("dim_value"):
+                        dims.append(dim.dim_value)
+                    elif dim.HasField("dim_param"):
+                        dims.append(dim.dim_param)
+                    else:
+                        dims.append("?")
+                logger.info(f"  Keeping output: {name} shape={tuple(dims)}")
+                if "cat_322" in name:
+                    last_dim = dims[-1] if dims else None
+                    if last_dim not in (7, 9, 12, 16, "9", "12", "16", "7"):
+                        logger.warning(
+                            "    Unexpected camera tensor width %s; VGGT runtime expects 7|9|12|16 (quat/T, pose encoding, or 4x4).",
+                            last_dim,
+                        )
+                    else:
+                        logger.info(
+                            "    cat_322 encodes camera pose as (B=1, V, %s). Depth outputs use (B=1, V, H, W).",
+                            last_dim,
+                        )
             else:
                 logger.info(f"  Removing output: {name}")
         

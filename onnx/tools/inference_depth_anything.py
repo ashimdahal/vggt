@@ -12,9 +12,17 @@ Designed for **FPS**:
 Keys: [q]=quit, [s]=snapshot (PNG + two PLYs)
 """
 
-import argparse, time, threading, queue, ctypes, sys, os, shutil, subprocess
-from typing import Tuple, Optional
+import argparse, time, threading, queue, ctypes, sys, os, shutil, subprocess, math
+from typing import Tuple, Optional, List, Dict
+from pathlib import Path
 import numpy as np, cv2
+
+THIS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = THIS_DIR.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from onnx.pcd.depth_anything import DepthAnythingPool
 
 # -------------------------- CuPy & Open3D ------------------------------------
 try:
@@ -110,7 +118,266 @@ def depth_to_u8(depth: np.ndarray) -> np.ndarray:
     dmax = float(np.max(v))
     if dmax <= 1e-12:
         return np.zeros_like(depth, np.uint8)
-    return (np.clip(depth/dmax, 0, 1)*255.0).astype(np.uint8)
+    return (np.clip(depth / dmax, 0, 1) * 255.0).astype(np.uint8)
+
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi", ".mpg", ".mpeg", ".mp4v")
+
+
+def _collect_images(folder: Path) -> List[Path]:
+    files: List[Path] = []
+    for ext in IMAGE_EXTS:
+        files.extend(sorted(folder.glob(f"*{ext}")))
+    return files
+
+
+def _collect_videos(folder: Path) -> List[Path]:
+    files: List[Path] = []
+    for ext in VIDEO_EXTS:
+        files.extend(sorted(folder.glob(f"*{ext}")))
+    return files
+
+
+def _colorize_depth(depth: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(depth) & (depth > 0)
+    if not np.any(finite):
+        return np.zeros((*depth.shape, 3), dtype=np.uint8)
+    lo, hi = np.percentile(depth[finite], [2.0, 98.0])
+    if hi - lo < 1e-6:
+        hi = lo + 1e-6
+    norm = np.clip((depth - lo) / (hi - lo), 0.0, 1.0)
+    u8 = (norm * 255.0).astype(np.uint8)
+    return cv2.applyColorMap(u8, cv2.COLORMAP_INFERNO)
+
+
+def run_offline_grid(args) -> None:
+    folder = Path(args.offline_dir).expanduser().resolve()
+    if not folder.exists():
+        raise FileNotFoundError(f"Input directory not found: {folder}")
+
+    image_paths = _collect_images(folder)
+    if not image_paths:
+        video_paths = _collect_videos(folder)
+        if video_paths:
+            print(f"[info] Detected video files under {folder}; switching to video stream mode.")
+            setattr(args, "offline_video_dir", str(folder))
+            run_video_stream(args)
+            return
+        raise RuntimeError(f"No image files found under {folder}")
+
+    if args.grid_limit and args.grid_limit > 0:
+        image_paths = image_paths[: int(args.grid_limit)]
+
+    images: Dict[str, np.ndarray] = {}
+    timestamps: Dict[str, float] = {}
+    for idx, path in enumerate(image_paths):
+        capture_ts = path.stat().st_mtime
+        bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            print(f"[warn] Skipping unreadable image: {path}")
+            continue
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        key = f"{idx:03d}_{path.stem}"
+        images[key] = rgb
+        timestamps[key] = capture_ts
+    if not images:
+        raise RuntimeError("No valid images to process.")
+
+    engine_path = Path(args.engine).expanduser().resolve()
+    with DepthAnythingPool(
+        engine_path.parent,
+        precision="auto",
+        num_workers=max(1, int(args.engine_workers)),
+        explicit_engine=engine_path,
+    ) as pool:
+        start = time.perf_counter()
+        depths = pool.infer_batch(images)
+        elapsed = time.perf_counter() - start
+
+    ordered_keys = list(images.keys())
+    tile_h, tile_w = next(iter(depths.values())).shape
+    if args.grid_cols and args.grid_cols > 0:
+        cols = min(int(args.grid_cols), len(ordered_keys))
+    else:
+        cols = len(ordered_keys)
+    cols = max(1, cols)
+    rows = math.ceil(len(ordered_keys) / cols)
+    grid = np.zeros((rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
+
+    for idx, key in enumerate(ordered_keys):
+        depth = depths.get(key)
+        if depth is None:
+            continue
+        colored = _colorize_depth(depth.astype(np.float32))
+        if colored.shape[0] != tile_h or colored.shape[1] != tile_w:
+            colored = cv2.resize(colored, (tile_w, tile_h), interpolation=cv2.INTER_LINEAR)
+        r = idx // cols
+        c = idx % cols
+        y0 = r * tile_h
+        y1 = y0 + tile_h
+        x0 = c * tile_w
+        x1 = x0 + tile_w
+        grid[y0:y1, x0:x1] = colored
+        label = key[:30]
+        ts = timestamps.get(key)
+        if ts is not None:
+            label += f" | t={ts:.2f}"
+        cv2.putText(
+            grid,
+            label,
+            (x0 + 10, y0 + 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    if ordered_keys:
+        avg_fps = len(ordered_keys) / max(elapsed, 1e-6)
+    else:
+        avg_fps = 0.0
+    fps_text = f"DepthAnything TRT FPS: {avg_fps:.2f}"
+    cv2.putText(
+        grid,
+        fps_text,
+        (20, grid.shape[0] - 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA,
+    )
+
+    window_title = args.grid_title
+    cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+    cv2.imshow(window_title, grid)
+    if args.grid_save:
+        save_path = Path(args.grid_save).expanduser().resolve()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(save_path), grid)
+        print(f"[info] Saved depth grid to {save_path}")
+    print("[info] Press any key to close the depth grid window.")
+    cv2.waitKey(0)
+    cv2.destroyWindow(window_title)
+
+
+def run_video_stream(args) -> None:
+    video_paths: List[Path] = []
+    mode_dir = False
+    if args.offline_video_dir:
+        mode_dir = True
+        video_dir = Path(args.offline_video_dir).expanduser().resolve()
+        if not video_dir.exists():
+            raise FileNotFoundError(f"Video directory not found: {video_dir}")
+        video_paths = _collect_videos(video_dir)
+    elif args.offline_video:
+        video_path = Path(args.offline_video).expanduser().resolve()
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video not found: {video_path}")
+        video_paths = [video_path]
+    else:
+        raise RuntimeError("run_video_stream requires --offline-video or --offline-video-dir")
+
+    if not video_paths:
+        raise RuntimeError("No video streams found for depth inference.")
+
+    if mode_dir and args.max_cams is not None:
+        video_paths = video_paths[: max(1, int(args.max_cams))]
+
+    caps: List[cv2.VideoCapture] = []
+    names: List[str] = []
+    try:
+        for path in video_paths:
+            cap = cv2.VideoCapture(str(path))
+            if not cap.isOpened():
+                raise RuntimeError(f"Failed to open video {path}")
+            caps.append(cap)
+            names.append(path.stem)
+
+        engine_path = Path(args.engine).expanduser().resolve()
+        with DepthAnythingPool(
+            engine_path.parent,
+            precision="auto",
+            num_workers=max(1, int(args.engine_workers)),
+            explicit_engine=engine_path,
+        ) as pool:
+            frame_count = 0
+            window = "DepthAnything TRT"
+            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+            try:
+                while True:
+                    images: Dict[str, np.ndarray] = {}
+                    raw_frames: Dict[str, np.ndarray] = {}
+                    for name, cap in zip(names, caps):
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            images = {}
+                            break
+                        raw_frames[name] = frame
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                        images[name] = rgb
+                    if not images:
+                        break
+
+                    frame_count += 1
+                    if args.grid_limit and args.grid_limit > 0 and frame_count > int(args.grid_limit):
+                        break
+
+                    start = time.perf_counter()
+                    depths = pool.infer_batch(images)
+                    elapsed = time.perf_counter() - start
+                    fps = len(images) / max(elapsed, 1e-6)
+
+                    pairs: List[np.ndarray] = []
+                    ordered_names = list(images.keys())
+                    for name in ordered_names:
+                        frame = raw_frames[name]
+                        depth = depths.get(name)
+                        if depth is None:
+                            continue
+                        colored = _colorize_depth(depth.astype(np.float32))
+                        colored = cv2.resize(colored, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+                        pair = np.hstack([frame, colored])
+                        cv2.putText(pair, name, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+                        pairs.append(pair)
+
+                    if not pairs:
+                        continue
+
+                    cols = args.grid_cols if args.grid_cols and args.grid_cols > 0 else len(pairs)
+                    cols = max(1, min(cols, len(pairs)))
+                    rows = math.ceil(len(pairs) / cols)
+                    tile_h, tile_w = pairs[0].shape[:2]
+                    canvas = np.zeros((rows * tile_h, cols * tile_w, 3), dtype=np.uint8)
+                    for idx, pair in enumerate(pairs):
+                        r = idx // cols
+                        c = idx % cols
+                        canvas[r * tile_h : (r + 1) * tile_h, c * tile_w : (c + 1) * tile_w] = pair
+                    cv2.putText(
+                        canvas,
+                        f"DepthAnything TRT FPS: {fps:.2f}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.imshow(window, canvas)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
+            finally:
+                cv2.destroyWindow(window)
+    finally:
+        for cap in caps:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
 
 # ---------------------- v4l2 + OpenCV bootstrap ------------------------------
 def _run(cmd: list[str]) -> None:
@@ -433,6 +700,15 @@ class DualPCDVisualizer:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True)
+    ap.add_argument("--offline-dir", type=str, default=None, help="Directory of images to process instead of live capture.")
+    ap.add_argument("--offline-video", type=str, default=None, help="Video file to process instead of live capture.")
+    ap.add_argument("--offline-video-dir", "--offline_video_dir", type=str, default=None, help="Directory of video streams to process instead of live capture.")
+    ap.add_argument("--grid-cols", type=int, default=0, help="Number of columns in offline depth mosaic (0=auto).")
+    ap.add_argument("--grid-limit", type=int, default=None, help="Limit number of viewpoints/frames in offline mode (<=0 for unlimited).")
+    ap.add_argument("--engine-workers", type=int, default=2, help="Number of TensorRT worker contexts to spawn.")
+    ap.add_argument("--max-cams", type=int, default=None, help="Limit number of cameras when streaming a directory of videos.")
+    ap.add_argument("--grid-save", type=str, default=None, help="Optional output path for offline depth mosaic.")
+    ap.add_argument("--grid-title", type=str, default="Depth Grid", help="Window title for offline visualization.")
     ap.add_argument("--devL", type=int, default=0)
     ap.add_argument("--devR", type=int, default=2)
     ap.add_argument("--w", type=int, default=1920)
@@ -455,6 +731,13 @@ def main():
     ap.add_argument("--disp_scale", type=float, default=0.6)
     ap.add_argument("--save_dir", type=str, default="captures")
     args = ap.parse_args()
+
+    if getattr(args, "offline_video_dir", None) or args.offline_video:
+        run_video_stream(args)
+        return
+    if args.offline_dir:
+        run_offline_grid(args)
+        return
 
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -575,5 +858,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

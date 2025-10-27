@@ -589,15 +589,69 @@ def load_image(path: Path) -> np.ndarray:
     return array
 
 
-def save_point_cloud(path: Path, points: np.ndarray) -> None:
+def save_point_cloud(path: Path, points: np.ndarray, colors: Optional[np.ndarray] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write("ply\nformat ascii 1.0\n")
         handle.write(f"element vertex {points.shape[0]}\n")
         handle.write("property float x\nproperty float y\nproperty float z\n")
+        if colors is not None:
+            handle.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
         handle.write("end_header\n")
-        for p in points:
-            handle.write(f"{p[0]} {p[1]} {p[2]}\n")
+        if colors is None:
+            for p in points:
+                handle.write(f"{p[0]} {p[1]} {p[2]}\n")
+        else:
+            for p, c in zip(points, colors):
+                handle.write(f"{p[0]} {p[1]} {p[2]} {int(c[0])} {int(c[1])} {int(c[2])}\n")
+
+
+def save_point_cloud_pcd(path: Path, points: np.ndarray, colors: Optional[np.ndarray] = None) -> None:
+    """
+    Persist a point cloud using the ASCII PCD v0.7 layout.
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must be shaped (N, 3)")
+    cols: Optional[np.ndarray] = None
+    if colors is not None:
+        cols = np.asarray(colors)
+        if cols.shape != pts.shape:
+            raise ValueError("colors must match points shape (N, 3)")
+        cols = cols.astype(np.uint8, copy=False)
+    count = int(pts.shape[0])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header: list[str] = [
+        "# .PCD v0.7 - Point Cloud Data file format",
+        "VERSION 0.7",
+        "FIELDS x y z" + (" red green blue" if cols is not None else ""),
+        "SIZE " + ("4 4 4 1 1 1" if cols is not None else "4 4 4"),
+        "TYPE " + ("F F F U U U" if cols is not None else "F F F"),
+        "COUNT " + ("1 1 1 1 1 1" if cols is not None else "1 1 1"),
+        f"WIDTH {count}",
+        "HEIGHT 1",
+        "VIEWPOINT 0 0 0 1 0 0 0",
+        f"POINTS {count}",
+        "DATA ascii",
+    ]
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(header))
+        if count == 0:
+            return
+        handle.write("\n")
+        if cols is None:
+            for idx, point in enumerate(pts):
+                handle.write(f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f}")
+                if idx + 1 < count:
+                    handle.write("\n")
+        else:
+            for idx, (point, color) in enumerate(zip(pts, cols)):
+                handle.write(
+                    f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} "
+                    f"{int(color[0])} {int(color[1])} {int(color[2])}"
+                )
+                if idx + 1 < count:
+                    handle.write("\n")
 
 
 def load_point_cloud(path: Path) -> np.ndarray:

@@ -88,6 +88,14 @@ class _DepthWorker(threading.Thread):
         device = cuda.Device(self.device_index)
         context = device.make_context()
         stream = None
+        # Keep references initialised for deterministic cleanup order
+        runtime = None
+        engine = None
+        context_trt = None
+        host_input = None
+        device_input = None
+        host_outputs = []
+        device_outputs = []
         try:
             logger = trt.Logger(trt.Logger.ERROR)
             with open(self.engine_path, "rb") as handle:
@@ -191,12 +199,60 @@ class _DepthWorker(threading.Thread):
                     stream.synchronize()
                     future.set_exception(exc)
         finally:
-            if stream is not None:
+            # Ensure proper destruction order: sync stream, free TRT/CUDA buffers, then pop context
+            try:
+                if stream is not None:
+                    try:
+                        stream.synchronize()
+                    except Exception:
+                        pass
+                # Explicitly delete device and host buffers before popping context
                 try:
-                    stream.synchronize()
+                    # Device allocations
+                    for dev in device_outputs or []:
+                        try:
+                            del dev
+                        except Exception:
+                            pass
+                    device_outputs = []
+                    if device_input is not None:
+                        try:
+                            del device_input
+                        except Exception:
+                            pass
+                        device_input = None
+                    # Host pinned buffers (must be freed before context pop)
+                    for buf in host_outputs or []:
+                        try:
+                            del buf
+                        except Exception:
+                            pass
+                    host_outputs = []
+                    if host_input is not None:
+                        try:
+                            del host_input
+                        except Exception:
+                            pass
+                        host_input = None
+                finally:
+                    # Destroy TRT objects prior to context pop
+                    try:
+                        del context_trt
+                    except Exception:
+                        pass
+                    try:
+                        del engine
+                    except Exception:
+                        pass
+                    try:
+                        del runtime
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    context.pop()
                 except Exception:
                     pass
-            context.pop()
 
 
 class DepthAnythingPool:
@@ -211,11 +267,18 @@ class DepthAnythingPool:
         precision: str,
         num_workers: int,
         device_index: int = 0,
+        explicit_engine: Optional[Path] = None,
     ) -> None:
-        engines = trt_utils.discover_engines(Path(engine_dir), precision, base_name="depth")
-        if not engines:
-            raise RuntimeError(f"No Depth Anything engines found in {engine_dir}")
-        self.engine_path = trt_utils.select_engine(engines, precision)
+        if explicit_engine is not None:
+            engine_path = Path(explicit_engine)
+            if not engine_path.exists():
+                raise FileNotFoundError(f"Depth Anything engine not found: {engine_path}")
+            self.engine_path = engine_path
+        else:
+            engines = trt_utils.discover_engines(Path(engine_dir), precision_hint=None, base_name="depth")
+            if not engines:
+                raise RuntimeError(f"No Depth Anything engines found in {engine_dir}")
+            self.engine_path = trt_utils.select_engine(engines, precision)
         self.num_workers = max(1, num_workers)
         self.device_index = device_index
         self.ctrl_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
