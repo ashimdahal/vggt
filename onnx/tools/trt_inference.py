@@ -595,14 +595,16 @@ def normalize(img_chw: np.ndarray, kind: str) -> np.ndarray:
     """
     if kind == "none":
         return img_chw
+    img = img_chw / 255.0
     if kind == "unit":
-        return img_chw / 255.0
+        return img
     if kind == "imagenet":
         # ImageNet normalization: input is RGB CHW in [0,255]
-        img = img_chw / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
         return (img - mean) / std
+    if kind in {"zero_center", "minus_one_to_one", "tanh"}:
+        return (img - 0.5) / 0.5
     raise ValueError(f"Unknown normalization: {kind}")
 
 def load_images_nchw(
@@ -695,8 +697,12 @@ Examples:
                     help="Use random input instead of images (pure model test)")
     
     # Preprocessing
-    ap.add_argument("--norm", choices=["none", "unit", "imagenet"], default="unit",
-                    help="Normalization for image inputs (default: unit)")
+    ap.add_argument(
+        "--norm",
+        choices=["none", "unit", "imagenet", "zero_center", "minus_one_to_one", "tanh"],
+        default="unit",
+        help="Normalization for image inputs (default: unit)",
+    )
     
     # Benchmarking
     ap.add_argument("--warmup", type=int, default=20,
@@ -829,4 +835,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

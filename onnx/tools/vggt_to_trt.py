@@ -43,7 +43,7 @@ from dataclasses import dataclass
 
 import onnx
 import numpy as np
-from onnx import helper, numpy_helper, AttributeProto
+from onnx import helper, numpy_helper, AttributeProto, TensorProto, ValueInfoProto
 from onnx.external_data_helper import convert_model_to_external_data
 
 # Configure logging
@@ -174,6 +174,61 @@ def _prod_map(g: onnx.GraphProto) -> dict:
             if o:
                 out[o] = n
     return out
+
+
+def _cast_tensor_proto_to_fp32(tensor: TensorProto) -> bool:
+    """Convert TensorProto data to float32 if currently float64/BFloat16."""
+    if tensor.data_type not in (TensorProto.DOUBLE, TensorProto.BFLOAT16):
+        return False
+    arr = numpy_helper.to_array(tensor).astype(np.float32)
+    name = tensor.name or ""
+    tensor.CopyFrom(numpy_helper.from_array(arr, name))
+    return True
+
+
+def _downcast_graph_fp64(graph: onnx.GraphProto) -> int:
+    """Recursively downcast float64 tensors within a graph to float32."""
+    converted = 0
+    for initializer in graph.initializer:
+        if _cast_tensor_proto_to_fp32(initializer):
+            converted += 1
+
+    def _fix_value_info(value_info: ValueInfoProto) -> None:
+        nonlocal converted
+        if not value_info.type.HasField("tensor_type"):
+            return
+        tensor_type = value_info.type.tensor_type
+        if tensor_type.elem_type in (TensorProto.DOUBLE, TensorProto.BFLOAT16):
+            tensor_type.elem_type = TensorProto.FLOAT
+            converted += 1
+
+    for value in list(graph.input) + list(graph.output) + list(graph.value_info):
+        _fix_value_info(value)
+
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type == AttributeProto.TENSOR:
+                if _cast_tensor_proto_to_fp32(attr.t):
+                    converted += 1
+            elif attr.type == AttributeProto.GRAPH:
+                converted += _downcast_graph_fp64(attr.g)
+            elif attr.type == AttributeProto.GRAPHS:
+                for sub in attr.graphs:
+                    converted += _downcast_graph_fp64(sub)
+            elif attr.type == AttributeProto.TENSORS:
+                for tensor in attr.tensors:
+                    if _cast_tensor_proto_to_fp32(tensor):
+                        converted += 1
+    return converted
+
+
+def _normalise_model(m: onnx.ModelProto, opset_version: Optional[int] = None) -> None:
+    """Ensure opset and dtype consistency before saving."""
+    if opset_version is not None:
+        _ensure_opset(m, opset_version)
+    converted = _downcast_graph_fp64(m.graph)
+    if converted > 0:
+        logger.info("Downcast %d float64 tensor(s) to float32 for ONNX compatibility.", converted)
 
 def _const_i64(name: str, vals: List[int]) -> onnx.NodeProto:
     """Create Constant node with int64 array."""
@@ -1264,6 +1319,8 @@ class VGGTPipeline:
         abs_p = _data_abs(onnx_path)
         _rm(abs_p)
         
+        _normalise_model(m, self.opset)
+
         convert_model_to_external_data(
             m, True, rel, EXTERNAL_DATA_THRESHOLD, False
         )
@@ -1277,11 +1334,11 @@ class VGGTPipeline:
         m = onnx.load(onnx_path, load_external_data=True)
         
         # CRITICAL FIX: Ensure valid opset BEFORE any operations
-        _ensure_opset(m, self.opset)
-        
+        _normalise_model(m, self.opset)
+
         rel = _data_rel(onnx_path)
         abs_p = _data_abs(onnx_path)
-        
+
         _rm(abs_p)
         
         convert_model_to_external_data(
@@ -1518,7 +1575,9 @@ class VGGTPipeline:
         rel = _data_rel(dst)
         abs_p = _data_abs(dst)
         _rm(abs_p)
-        
+
+        _normalise_model(m, self.opset)
+
         convert_model_to_external_data(
             m, True, rel, EXTERNAL_DATA_THRESHOLD, False
         )
@@ -1543,8 +1602,8 @@ class VGGTPipeline:
         logger.info("Simplifying ONNX graph...")
         m = onnx.load(src, load_external_data=True)
         
-        # CRITICAL FIX: Ensure valid opset (this was causing the error)
-        _ensure_opset(m, self.opset)
+        # Ensure opset + dtype consistency before simplification
+        _normalise_model(m, self.opset)
         
         # Verify opset is now correct
         logger.info(f"Model IR version: {m.ir_version}")
@@ -1582,6 +1641,8 @@ class VGGTPipeline:
         rel = _data_rel(dst)
         abs_p = _data_abs(dst)
         _rm(abs_p)
+
+        _normalise_model(ms, self.opset)
 
         convert_model_to_external_data(ms, True, rel, EXTERNAL_DATA_THRESHOLD, False)
         onnx.save_model(ms, dst)
